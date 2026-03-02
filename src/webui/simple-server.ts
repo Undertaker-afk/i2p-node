@@ -80,6 +80,8 @@ export class SimpleWebUI extends EventEmitter {
       this.serveStatusAPI(res);
     } else if (url === '/api/peers') {
       this.servePeersAPI(res);
+    } else if (url === '/api/netdb') {
+      this.serveNetDbAPI(res);
     } else {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not Found');
@@ -138,6 +140,7 @@ export class SimpleWebUI extends EventEmitter {
         <div class="stat"><span class="stat-label">Active Peers:</span> <span id="activePeers">-</span></div>
         <div class="stat"><span class="stat-label">Floodfills:</span> <span id="floodfills">-</span></div>
         <div class="stat"><span class="stat-label">Active Tunnels:</span> <span id="tunnels">-</span></div>
+        <div class="stat"><span class="stat-label">LeaseSets:</span> <span id="leasesets">-</span></div>
     </div>
     
     <div class="section">
@@ -152,6 +155,15 @@ export class SimpleWebUI extends EventEmitter {
         <h2>Recent Peers</h2>
         <table id="peersTable">
             <tr><th>Hash</th><th>Type</th><th>Bandwidth</th><th>Last Seen</th></tr>
+        </table>
+    </div>
+    
+    <div class="section">
+        <h2>LeaseSets (NetDb)</h2>
+        <div class="stat"><span class="stat-label">Total LeaseSets:</span> <span id="lsTotal">-</span></div>
+        <div class="stat"><span class="stat-label">Sample:</span></div>
+        <table id="lsTable">
+            <tr><th>Hash (b32)</th><th>Expires (ms)</th><th>Store Type</th></tr>
         </table>
     </div>
     
@@ -204,6 +216,23 @@ export class SimpleWebUI extends EventEmitter {
                 });
             } catch(e) {
                 console.error('Failed to load peers:', e);
+            }
+            
+            try {
+                const res = await fetch('/api/netdb');
+                const data = await res.json();
+                document.getElementById('leasesets').textContent = data.leaseSetCount;
+                document.getElementById('lsTotal').textContent = data.leaseSetCount;
+                const table = document.getElementById('lsTable');
+                table.innerHTML = '<tr><th>Hash (b32)</th><th>Expires (ms)</th><th>Store Type</th></tr>';
+                data.leaseSets.slice(0, 10).forEach(ls => {
+                    const row = table.insertRow();
+                    row.insertCell().textContent = ls.hashB32;
+                    row.insertCell().textContent = ls.expires;
+                    row.insertCell().textContent = ls.storeType;
+                });
+            } catch(e) {
+                console.error('Failed to load netdb:', e);
             }
             
             document.getElementById('lastUpdate').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
@@ -379,6 +408,29 @@ export class SimpleWebUI extends EventEmitter {
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ peers }));
+  }
+
+  private serveNetDbAPI(res: ServerResponse): void {
+    const netDb = this.router?.getNetworkDatabase();
+    const leaseSets = netDb?.getAllLeaseSets() || [];
+
+    const payload = {
+      leaseSetCount: netDb?.getLeaseSetCount() || 0,
+      leaseSets: leaseSets.map((ls) => {
+        const hashHex = ls.getHash().toString('hex');
+        // minimal LS2 vs LS1 hint if available on the object; fall back to 'unknown'
+        const storeType = (ls as any).storeType ?? (ls as any).getStoreType?.() ?? 'unknown';
+        return {
+          hash: hashHex,
+          hashB32: typeof (ls as any).getBase32 === 'function' ? (ls as any).getBase32() : hashHex,
+          expires: ls.getExpiration(),
+          storeType
+        };
+      })
+    };
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(payload));
   }
 }
 

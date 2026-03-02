@@ -47,7 +47,8 @@ async function main(): Promise<void> {
   killProcessesOnPort(NTCP2_PORT);
 
   const router = new I2PRouter({
-    enableWebUI: false,
+    enableWebUI: true,
+    webUIPort: 7070,
     dataDir: './i2p-test-data',
     logLevel: LogLevel.DEBUG,
     ntcp2Port: NTCP2_PORT
