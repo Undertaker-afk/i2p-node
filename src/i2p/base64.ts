@@ -7,7 +7,8 @@ export function i2pBase64ToStd(s: string): string {
 }
 
 export function stdBase64ToI2p(s: string): string {
-  return s.replace(/\+/g, '-').replace(/\//g, '~').replace(/=+$/g, '');
+  // Keep '=' padding – i2pd's Base64ToByteStream requires length % 4 == 0
+  return s.replace(/\+/g, '-').replace(/\//g, '~');
 }
 
 export function i2pBase64Decode(s: string): Buffer {
