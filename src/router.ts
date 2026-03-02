@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { Crypto } from './crypto/index.js';
 import { RouterIdentity, RouterInfo, RouterAddress } from './data/router-info.js';
 import { LeaseSet } from './data/lease-set.js';
+import { parseLeaseSetI2P } from './data/lease-set-i2p.js';
 import { I2NPMessages, I2NPMessageType } from './i2np/messages.js';
 import { NetworkDatabase } from './netdb/index.js';
 import { TunnelManager, TunnelType } from './tunnel/manager.js';
@@ -522,16 +523,24 @@ export class I2PRouter extends EventEmitter {
       }
     } else if (type === 1) {
       // LeaseSet / LeaseSet2 (parsed into our LeaseSet abstraction)
+      let leaseSet: LeaseSet | null = null;
       try {
-        const leaseSet = LeaseSet.deserialize(data);
+        // Try classic LeaseSet (LS1) layout first.
+        leaseSet = LeaseSet.deserialize(data);
+      } catch {
+        // Fallback to LS2 parser (standard, unencrypted).
+        leaseSet = parseLeaseSetI2P(data, key);
+      }
+
+      if (leaseSet) {
         this.netDb.storeLeaseSet(leaseSet);
         logger.debug(
           `DatabaseStore (LeaseSet) for ${key.toString('hex').slice(0, 16)}...`,
           undefined,
           'Router'
         );
-      } catch (err) {
-        logger.warn('Failed to deserialize LeaseSet from DatabaseStore', { error: (err as Error).message }, 'Router');
+      } else {
+        logger.warn('Failed to deserialize LeaseSet/LeaseSet2 from DatabaseStore', undefined, 'Router');
       }
     } else {
       logger.debug(`DatabaseStore with unsupported type=${type}`, undefined, 'Router');

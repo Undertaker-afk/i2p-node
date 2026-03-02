@@ -22,11 +22,10 @@ build/
 
 # Data directories
 i2p-data/
-netDb/
 peerProfiles/
 tunnels/
 logs/
-
+i2p-test-data/
 # IDE
 .vscode/
 .idea/
