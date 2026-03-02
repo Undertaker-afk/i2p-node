@@ -665,14 +665,16 @@ export class I2PRouter extends EventEmitter {
 
     // 1) Try NTCP2 (or NTCP v=2) if present with full keys (host/port/s/i).
     if (this.ntcp2) {
-      const ntcpAddr = floodfill.addresses.find(
-        (a) =>
-          a.transportStyle.toUpperCase().startsWith('NTCP') &&
-          a.options.host &&
-          a.options.port &&
-          a.options.s &&
-          a.options.i
-      );
+      // Prefer IPv4 NTCP/NTCP2 addresses with full s/i options; skip IPv6/Ygg/Yggdrasil for now.
+      const ntcpAddr = floodfill.addresses.find((a) => {
+        const styleOk = a.transportStyle.toUpperCase().startsWith('NTCP');
+        const host = a.options.host;
+        const hasKeys = a.options.s && a.options.i && a.options.port;
+        if (!styleOk || !host || !hasKeys) return false;
+        // crude IPv4 detection: no ':' and not bracketed.
+        if (host.includes(':') || host.startsWith('[')) return false;
+        return true;
+      });
 
       if (ntcpAddr) {
         const host = ntcpAddr.options.host;
@@ -696,37 +698,12 @@ export class I2PRouter extends EventEmitter {
           }
         }
       } else {
-        logger.debug('No NTCP/NTCP2 address with s/i found for floodfill', undefined, 'Router');
+        logger.debug('No IPv4 NTCP/NTCP2 address with s/i found for floodfill', undefined, 'Router');
       }
     }
 
-    // 2) Fall back to SSU2 if available (host/port/s).
-    if (this.ssu2) {
-      const ssuAddr = floodfill.addresses.find(
-        (a) => a.transportStyle === 'SSU2' && a.options.host && a.options.port && a.options.s
-      );
-      if (!ssuAddr) {
-        logger.debug('No SSU2 address with host/port/s found for floodfill', undefined, 'Router');
-        return;
-      }
-
-      const host = ssuAddr.options.host;
-      const portNum = parseInt(ssuAddr.options.port, 10);
-      if (!host || !portNum || Number.isNaN(portNum)) {
-        logger.debug('Invalid SSU2 address for floodfill', { host, port: ssuAddr.options.port }, 'Router');
-        return;
-      }
-
-      try {
-        await this.ssu2.connect(host, portNum, floodfill);
-        const sessionId = `${host}:${portNum}`;
-        this.ssu2.send(sessionId, wire);
-        this.stats.messagesSent++;
-        this.stats.bytesSent += wire.length;
-      } catch (err) {
-        logger.warn('Exploratory SSU2 lookup failed', { error: (err as Error).message }, 'Router');
-      }
-    }
+    // NOTE: SSU2 fallback is temporarily disabled for exploratory lookups while
+    // NTCP2 interop is being hardened; SSU2 is not yet reliably interoperable.
   }
 
   private publishRouterInfo(): void {
@@ -841,16 +818,16 @@ export class I2PRouter extends EventEmitter {
     floodfill: RouterInfo,
     lookupType: 0 | 1 | 2 | 3
   ): Promise<void> {
-    // Prefer NTCP2 (or NTCP v2) with full keys; SSU2 fallback.
+    // Prefer IPv4 NTCP2/NTCP with full keys; SSU2 fallback is disabled for now.
     if (this.ntcp2) {
-      const ntcpAddr = floodfill.addresses.find(
-        (a) =>
-          a.transportStyle.toUpperCase().startsWith('NTCP') &&
-          a.options.host &&
-          a.options.port &&
-          a.options.s &&
-          a.options.i
-      );
+      const ntcpAddr = floodfill.addresses.find((a) => {
+        const styleOk = a.transportStyle.toUpperCase().startsWith('NTCP');
+        const host = a.options.host;
+        const hasKeys = a.options.s && a.options.i && a.options.port;
+        if (!styleOk || !host || !hasKeys) return false;
+        if (host.includes(':') || host.startsWith('[')) return false;
+        return true;
+      });
       if (ntcpAddr) {
         const host = ntcpAddr.options.host!;
         const portNum = parseInt(ntcpAddr.options.port, 10);
@@ -868,24 +845,8 @@ export class I2PRouter extends EventEmitter {
       }
     }
 
-    if (this.ssu2) {
-      const ssuAddr = floodfill.addresses.find(
-        (a) => a.transportStyle === 'SSU2' && a.options.host && a.options.port && a.options.s
-      );
-      if (!ssuAddr) return;
-      const host = ssuAddr.options.host!;
-      const portNum = parseInt(ssuAddr.options.port, 10);
-      if (!host || !portNum || Number.isNaN(portNum)) return;
-
-      const fromHash = this.routerInfo!.getRouterHash();
-      const msg = I2NPMessages.createDatabaseLookup(targetHash, fromHash, lookupType, []);
-      const wire = I2NPMessages.serializeMessage(msg);
-      await this.ssu2.connect(host, portNum, floodfill);
-      const sessionId = `${host}:${portNum}`;
-      this.ssu2.send(sessionId, wire);
-      this.stats.messagesSent++;
-      this.stats.bytesSent += wire.length;
-    }
+    // SSU2 path intentionally disabled while transport is MVP-only and not
+    // interoperable with stock routers yet.
   }
 
   async buildInboundTunnel(hops = 3): Promise<ReturnType<TunnelManager['buildTunnel']>> {

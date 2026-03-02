@@ -93,7 +93,10 @@ Goal: Feature set closer to `i2pd` / Java I2P, capable of general-purpose use (s
   - [ ] Garlic message routing and reply blocks
 
 - [ ] **LeaseSets & Destinations**
-  - [ ] Full LeaseSet parsing/serialization
+  - [x] Basic LeaseSet (LS1) parsing/serialization
+  - [x] Standard, public LeaseSet2 (LS2) parsing into internal `LeaseSet` (no encrypted LS2, no offline keys yet)
+  - [ ] Encrypted LeaseSet2 (ELS2) support (blinded keys, HKDF layers, client auth)
+  - [ ] Full LeaseSet publish path (LocalLeaseSet/LS2 creation and signing)
   - [ ] Local destination management for services (HTTP proxies, IRC, etc.)
   - [ ] Garlic signing/encryption with correct crypto suites
 
