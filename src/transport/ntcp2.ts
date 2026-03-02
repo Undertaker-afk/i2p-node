@@ -151,7 +151,7 @@ export class NTCP2Transport extends EventEmitter {
    * an NTCP2 address with options: host, port, s, i.
    */
   async connect(host: string, port: number, remoteRouterInfo: RouterInfo): Promise<void> {
-    const { s, i } = this.extractRemoteNtcp2Keys(remoteRouterInfo);
+    const { s, i } = this.extractRemoteNtcp2Keys(remoteRouterInfo, host, port);
     const remoteRouterHash = Buffer.from(remoteRouterInfo.getRouterHash());
 
     return new Promise((resolve, reject) => {
@@ -563,15 +563,19 @@ export class NTCP2Transport extends EventEmitter {
     this.emit('error', { sessionId, error: err });
   }
 
-  private extractRemoteNtcp2Keys(ri: RouterInfo): { s: Buffer; i: Buffer } {
-    // Some routers publish NTCP2 as "NTCP" with v=2, others as "NTCP2".
-    const addr = ri.addresses.find(
-      (a) =>
-        a.transportStyle.toUpperCase().startsWith('NTCP') &&
-        a.options.s &&
-        a.options.i
+  /**
+   * Extract the remote router's NTCP2 static key (s) and IV (i).
+   *
+   * IMPORTANT: When multiple NTCP/NTCP2 addresses are present (IPv4/IPv6/Ygg),
+   * we MUST prefer the address that matches the host/port we are actually
+   * connecting to. Otherwise we might AES-encrypt X/Y with an IV from a
+   * different address than the TCP endpoint, which breaks interop with i2pd.
+   */
+  private extractRemoteNtcp2Keys(ri: RouterInfo, hostHint?: string, portHint?: number): { s: Buffer; i: Buffer } {
+    const addrs = ri.addresses.filter(
+      (a) => a.transportStyle.toUpperCase().startsWith('NTCP') && a.options.s && a.options.i
     );
-    if (!addr) {
+    if (!addrs.length) {
       if (DEBUG) {
         console.log(
           'NTCP2 extractRemoteNtcp2Keys: no address with s/i, got:',
@@ -581,6 +585,30 @@ export class NTCP2Transport extends EventEmitter {
           }))
         );
       }
+      throw new Error('remote has no NTCP/NTCP2 address with s/i');
+    }
+
+    let addr = addrs[0];
+
+    if (hostHint && typeof portHint === 'number') {
+      const portStr = String(portHint);
+      const match = addrs.find((a) => {
+        const h = a.options.host;
+        const p = a.options.port != null ? String(a.options.port) : undefined;
+        return h === hostHint && p === portStr;
+      });
+      if (match) {
+        addr = match;
+      } else if (DEBUG) {
+        console.log('NTCP2 extractRemoteNtcp2Keys: no exact addr match for host/port hint', {
+          hostHint,
+          portHint,
+          candidates: addrs.map((a) => ({ host: a.options.host, port: a.options.port }))
+        });
+      }
+    }
+
+    if (!addr) {
       throw new Error('remote has no NTCP/NTCP2 address with s/i');
     }
     const s = i2pBase64Decode(addr.options.s);

@@ -401,7 +401,9 @@ export class I2PRouter extends EventEmitter {
     });
 
     this.ntcp2.on('error', (err) => {
-      this.emit('error', { transport: 'NTCP2', error: err });
+      // Normalize NTCP2 error so logger sees the real Error object.
+      const wrapped = (err as any) && (err as any).error ? (err as any).error : err;
+      this.emit('error', { transport: 'NTCP2', error: wrapped });
     });
 
     await this.ntcp2.start();
