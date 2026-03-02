@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build output
+dist/
+build/
+*.js
+*.js.map
+*.d.ts
+*.d.ts.map
+
+# Keep source TypeScript files
+!src/**/*.ts
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Data directories
+i2p-data/
+netDb/
+peerProfiles/
+tunnels/
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+coverage/
+.nyc_output/
+*.test.js
+
+# Temporary files
+tmp/
+temp/
+*.tmp
