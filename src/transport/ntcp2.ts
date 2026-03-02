@@ -4,6 +4,7 @@ import { Crypto } from '../crypto/index.js';
 import { RouterInfo } from '../data/router-info.js';
 import { logger } from '../utils/logger.js';
 import { i2pBase64Decode } from '../i2p/base64.js';
+import { ed25519 } from '@noble/curves/ed25519';
 
 type SessionState = 'init' | 'm1_sent' | 'm2_sent' | 'm2_recv' | 'm3_sent' | 'm3_recv' | 'established';
 
@@ -508,6 +509,31 @@ export class NTCP2Transport extends EventEmitter {
     mixKey(hs, dh);
 
     const ri = this.options.routerInfo;
+    if (DEBUG && !(this as any)._riDumped) {
+      (this as any)._riDumped = true;
+      console.log(`NTCP2 m3 RI length=${ri.length}`);
+      // Self-verify: Ed25519 signature is last 64 bytes
+      const unsigned = ri.subarray(0, ri.length - 64);
+      const sig = ri.subarray(ri.length - 64);
+      // Extract Ed25519 pubkey from identity: right-aligned in signingKey[128] at offset 256+96=352
+      const edPub = ri.subarray(352, 384);
+      try {
+        const ok = ed25519.verify(sig, unsigned, edPub);
+        console.log(`NTCP2 m3 RI self-verify sig=${ok ? 'VALID' : 'INVALID'}`);
+      } catch (e) { console.log(`NTCP2 m3 RI self-verify error: ${(e as Error).message}`); }
+      // Dump identity cert type and extended info
+      const certType = ri.readUInt8(384);
+      const certLen = ri.readUInt16BE(385);
+      console.log(`NTCP2 m3 RI identity certType=${certType} certLen=${certLen}`);
+      if (certType === 5 && certLen === 4) {
+        const sigType = ri.readUInt16BE(387);
+        const cryptoType = ri.readUInt16BE(389);
+        console.log(`NTCP2 m3 RI sigType=${sigType} cryptoType=${cryptoType}`);
+      }
+      // Published timestamp 
+      const pubMs = Number(ri.readBigUInt64BE(391));
+      console.log(`NTCP2 m3 RI publishedMs=${pubMs} age=${Math.floor((Date.now() - pubMs)/1000)}s`);
+    }
     const blk = Buffer.alloc(4);
     blk.writeUInt8(2, 0);
     blk.writeUInt16BE(1 + ri.length, 1);
@@ -588,6 +614,23 @@ export class NTCP2Transport extends EventEmitter {
     const plain = decryptDataFrame(dp, frame);
     const blocks = decodeBlocks(plain);
     for (const b of blocks) {
+      if (b.type === 4 && b.data.length >= 9) {
+        // Termination block: 8 bytes sequence number + 1 byte reason
+        const reason = b.data.readUInt8(8);
+        const REASONS = [
+          'NormalClose','TerminationReceived','IdleTimeout','RouterShutdown',
+          'DataPhaseAEADFailure','IncompatibleOptions','IncompatibleSignatureType',
+          'ClockSkew','PaddingViolation','AEADFramingError','PayloadFormatError',
+          'Message1Error','Message2Error','Message3Error','IntraFrameReadTimeout',
+          'RouterInfoSignatureVerificationFail','IncorrectSParameter','Banned'
+        ];
+        const reasonStr = REASONS[reason] ?? `Unknown(${reason})`;
+        if (DEBUG) console.log(`NTCP2 received Termination [${sessionId}] reason=${reason} (${reasonStr})`);
+        logger.warn('NTCP2 termination received', { sessionId, reason, reasonStr }, 'NTCP2');
+      }
+      if (DEBUG && b.type !== 3 && b.type !== 254) {
+        console.log(`NTCP2 data block [${sessionId}] type=${b.type} len=${b.data.length}`);
+      }
       if (b.type === 3) this.emit('message', { sessionId, data: b.data });
     }
     return session.recvBuffer.length >= 2;
