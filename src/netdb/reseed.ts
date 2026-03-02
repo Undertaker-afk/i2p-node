@@ -197,6 +197,8 @@ class SU3Parser {
  */
 export class Reseeder extends EventEmitter {
   private servers: ReseedServer[] = [
+    { url: 'https://reseed.sahil.world/', enabled: true },
+    { url: 'https://i2p.diyarciftci.xyz/', enabled: true },
     { url: 'https://reseed2.i2p.net/', enabled: true },
     { url: 'https://reseed.diva.exchange/', enabled: true },
     { url: 'https://reseed-fr.i2pd.xyz/', enabled: true },

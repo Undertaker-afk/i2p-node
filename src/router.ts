@@ -128,6 +128,11 @@ export class I2PRouter extends EventEmitter {
       this.stats.floodfillPeers = this.netDb.getFloodfillCount();
     });
 
+    // Forward leaseSetStored so callers can subscribe directly on the router
+    this.netDb.on('leaseSetStored', (evt: { hash: Buffer; leaseSet: LeaseSet }) => {
+      this.emit('leaseSetStored', evt);
+    });
+
     // Listen for exploratory lookups and trigger DatabaseLookup messages
     this.netDb.on('exploratoryLookup', ({ targetHash, floodfill }: { targetHash: Buffer; floodfill: RouterInfo }) => {
       logger.debug(
@@ -166,7 +171,18 @@ export class I2PRouter extends EventEmitter {
     });
 
     this.on('error', ({ transport, error }: { transport: string; error: Error }) => {
-      logger.error(`Error in ${transport}`, { message: error.message, stack: error.stack }, transport);
+      // Connectivity failures (timeout, RST, peer close) are expected during bootstrapping
+      const msg = error?.message ?? '';
+      const isExpectedNetworkError =
+        msg === 'connect timeout' ||
+        msg.includes('ECONNRESET') ||
+        msg.includes('ECONNREFUSED') ||
+        msg.includes('socket closed before handshake');
+      if (isExpectedNetworkError) {
+        logger.warn(`${transport} connection failed`, { error: msg }, transport);
+      } else {
+        logger.error(`Error in ${transport}`, { message: msg, stack: error.stack }, transport);
+      }
     });
   }
 
@@ -246,6 +262,7 @@ export class I2PRouter extends EventEmitter {
       this.maintenanceInterval = null;
     }
 
+    this.netDb?.stop();
     this.ntcp2?.stop();
     this.ssu2?.stop();
     this.sam?.stop();
@@ -393,7 +410,7 @@ export class I2PRouter extends EventEmitter {
       staticPublicKey: Buffer.from(this.identity.identity.encryptionPublicKey),
       routerInfo: this.wireRouterInfo,
       netId: this.options.netId ?? 2,
-      connectTimeoutMs: 8000
+      connectTimeoutMs: 5000
     });
 
     this.ntcp2.on('message', ({ sessionId, data }) => {

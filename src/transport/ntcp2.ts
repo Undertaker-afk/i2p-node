@@ -560,6 +560,9 @@ export class NTCP2Transport extends EventEmitter {
   }
 
   private handleError(sessionId: string, err: Error): void {
+    // Only emit if session is still tracked; spurious events can fire after
+    // the session has been cleaned up (e.g. destroy() emits error then close).
+    if (!this.sessions.has(sessionId)) return;
     this.emit('error', { sessionId, error: err });
   }
 
