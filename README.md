@@ -1,17 +1,42 @@
-# I2P Router - TypeScript Implementation
+# I2P Router — TypeScript Implementation
 
-A complete I2P (Invisible Internet Project) router implementation in TypeScript/Node.js.
+A work-in-progress I2P router written in TypeScript/Node.js, designed to interoperate with the production I2P network (i2pd, Java I2P). The project is structured around a checkpoint-based development plan progressing toward an MVP: start router → build tunnels → resolve a .b32.i2p destination → stream-connect → HTTP GET an eepsite.
 
-## Overview
+## Current Status
 
-This project implements a full-featured I2P router with support for:
-- **NTCP2 Transport**: Noise-based TCP transport for router-to-router communication
-- **SSU2 Transport**: Modern UDP transport with ChaCha20/Poly1305 encryption
-- **I2NP Protocol**: I2P Network Protocol for routing messages
-- **Network Database (netDb)**: Distributed storage for RouterInfo and LeaseSet
-- **Tunnel Management**: Inbound and outbound tunnel building
-- **Peer Profiling**: Quality-based peer selection
-- **SAM Protocol**: Simple Anonymous Messaging for client applications
+| Checkpoint | Area | Progress |
+|:----------:|------|:--------:|
+| **A** | Identities + RouterInfo publish | ~90% |
+| **B** | NTCP2 handshake + data phase | ~85% |
+| **C** | SSU2 session establishment | ~20% |
+| **D** | I2NP + NetDb messaging | ~75% |
+| **E** | Tunnels (ECIES) + tunnel messages | ~30% |
+| **F** | Garlic + LeaseSet2 + base32 resolution | ~60% |
+| **G** | Streaming + HTTP fetch | ~15% |
+| **H** | Toward complete (SAM, WebUI, etc.) | ~20% |
+
+**Critical path to MVP:** `E (real tunnel builds) → F (garlic) → G (streaming + HTTP)`
+
+See [TODO.md](TODO.md) for detailed per-checkpoint task breakdown.
+
+### What Works Today
+
+- **NTCP2 outbound sessions** — Full Noise XK handshake with AES-CBC obfuscation, ChaCha20-Poly1305 AEAD, SipHash length obfuscation. Tested against real i2pd peers with ~60% connection success rate (remaining failures are NAT/offline peers, not protocol bugs).
+- **Reseed** — HTTPS reseed from real reseed servers, SU3 parsing, ZIP extraction, RouterInfo import.
+- **RouterInfo** — i2pd-compatible wire format writer, Ed25519 signing, correct I2P base64 (with padding), unpublished NTCP2 address.
+- **I2NP over NTCP2** — DatabaseStore (with gzip decompression for incoming RI), DatabaseLookup, DeliveryStatus sent and received over established sessions.
+- **NetDb** — In-memory + disk-persisted router/leaseset storage, floodfill tracking, maintenance/expiration.
+- **LeaseSet parsing** — LS1 and LS2 with ECIES-X25519 encryption key preference.
+- **Base32 resolution** — `.b32.i2p` → 32-byte hash → floodfill lookup.
+- **Peer profiling** — Connection scoring and peer selection by capacity/floodfill/failure rate.
+
+### What's Missing
+
+- **Tunnel builds over the network** — TunnelManager scaffolds tunnels locally but does not send ECIES-X25519 build records.
+- **Garlic messaging** — Entirely unimplemented. Required to wrap messages through tunnels.
+- **Spec-compliant streaming** — Only a naive custom scaffold exists. I2P streaming protocol (SYN/CLOSE/RESET, window sizing) is not implemented.
+- **SSU2** — Skeleton only; no token exchange, SessionConfirmed, or ack/nack.
+- **Router participation** — No relay, introducer, or peer testing support.
 
 ## Architecture
 
@@ -20,199 +45,130 @@ This project implements a full-featured I2P router with support for:
 │                         I2P Router                          │
 ├─────────────────────────────────────────────────────────────┤
 │  SAM Protocol  │  Tunnel Manager  │  Network Database       │
-│  (Port 7656)   │                  │  (RouterInfo/LeaseSet)  │
+│  (scaffold)    │  (local only)    │  (RouterInfo/LeaseSet)  │
 ├────────────────┴──────────────────┴─────────────────────────┤
 │                      I2NP Messages                          │
 ├─────────────────────────────────────────────────────────────┤
 │  NTCP2 Transport        │        SSU2 Transport             │
-│  (TCP Port 12345)       │        (UDP Port 12346)           │
+│  (working)              │        (skeleton)                 │
 ├─────────────────────────────────────────────────────────────┤
 │                 Cryptographic Layer                         │
-│     X25519  │  ChaCha20/Poly1305  │  SHA256  │  HKDF        │
+│  X25519 │ Ed25519 │ ChaCha20-Poly1305 │ AES-CBC │ SipHash   │
+│  SHA-256 │ HKDF │ HMAC                                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Installation
+## Getting Started
+
+### Prerequisites
+
+- Node.js 18+
+- npm
+
+### Installation
 
 ```bash
 npm install
 ```
 
-## Building
+### Building
 
 ```bash
-npm run build
+npx tsc
 ```
 
-## Running
-
-### Development
-```bash
-npm run dev
-```
-
-### Production
-```bash
-npm run build
-npm start
-```
-
-## Configuration
-
-Configure the router using environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `I2P_HOST` | `0.0.0.0` | Bind address |
-| `I2P_NTCP2_PORT` | `12345` | NTCP2 transport port |
-| `I2P_SSU2_PORT` | `12346` | SSU2 transport port |
-| `I2P_SAM_PORT` | `7656` | SAM protocol port |
-| `I2P_FLOODFILL` | `false` | Enable floodfill mode |
-| `I2P_BANDWIDTH` | `L` | Bandwidth class (K, L, M, N, O, P, X) |
-| `I2P_SHARE_PERCENTAGE` | `80` | Bandwidth share percentage |
-| `I2P_NET_ID` | `2` | Network ID |
-| `I2P_DATA_DIR` | `./i2p-data` | Data directory |
-
-## Usage
-
-### As a CLI Application
+### Running
 
 ```bash
-# Start with default settings
+# Start the router
 node dist/index.js
 
-# Start as floodfill with higher bandwidth
-I2P_FLOODFILL=true I2P_BANDWIDTH=X node dist/index.js
+# Run the NTCP2 connection test (connects to 30 random peers)
+node test-ntcp2-connect.mjs
 ```
-
-### As a Library
-
-```typescript
-import { I2PRouter } from 'i2p-node';
-
-const router = new I2PRouter({
-  host: '0.0.0.0',
-  ntcp2Port: 12345,
-  ssu2Port: 12346,
-  samPort: 7656,
-  isFloodfill: false,
-  bandwidthClass: 'L'
-});
-
-router.on('started', () => {
-  console.log('Router started');
-});
-
-router.on('tunnelBuilt', ({ tunnelId, type }) => {
-  console.log(`Tunnel ${tunnelId} built (${type})`);
-});
-
-await router.start();
-```
-
-### Building Tunnels
-
-```typescript
-// Build an inbound tunnel (for receiving)
-const inboundTunnel = await router.buildInboundTunnel(3);
-
-// Build an outbound tunnel (for sending)
-const outboundTunnel = await router.buildOutboundTunnel(3);
-
-// Create a LeaseSet for a destination
-const leaseSet = router.getTunnelManager()?.createLeaseSet([inboundTunnel!.id]);
-```
-
-### Using SAM Protocol
-
-Connect to the SAM bridge at `127.0.0.1:7656`:
-
-```
-HELLO VERSION MIN=3.0 MAX=3.1\n
-SESSION CREATE STYLE=STREAM ID=mySession DESTINATION=TRANSIENT\n
-STREAM CONNECT ID=mySession DESTINATION=target.b32.i2p\n```
 
 ## Project Structure
 
 ```
 i2p-node/
 ├── src/
-│   ├── crypto/
-│   │   └── index.ts          # Cryptographic primitives
-│   ├── data/
-│   │   ├── router-info.ts    # RouterIdentity, RouterAddress, RouterInfo
-│   │   └── lease-set.ts      # Lease, LeaseSet
-│   ├── transport/
-│   │   ├── ntcp2.ts          # NTCP2 transport implementation
-│   │   └── ssu2.ts           # SSU2 transport implementation
-│   ├── i2np/
-│   │   └── messages.ts       # I2NP message types and parsing
-│   ├── netdb/
-│   │   └── index.ts          # Network database
-│   ├── tunnel/
-│   │   └── manager.ts        # Tunnel management
-│   ├── peer/
-│   │   └── profiles.ts       # Peer profiling and selection
-│   ├── sam/
-│   │   └── protocol.ts       # SAM protocol implementation
-│   ├── router.ts             # Main router orchestration
-│   └── index.ts              # Entry point
-├── dist/                     # Compiled JavaScript
+│   ├── crypto/             # X25519, Ed25519, ChaCha20, AES, SipHash, HKDF
+│   ├── data/               # RouterInfo, RouterIdentity, LeaseSet parsers/writers
+│   ├── i2np/               # I2NP message types and serialization
+│   ├── i2p/                # Base64, RouterInfo writer, identity utilities
+│   ├── netdb/              # Network database, reseed, disk persistence
+│   ├── peer/               # Peer profiling and selection
+│   ├── resolution/         # Base32 resolution, LeaseSet fetching
+│   ├── sam/                # SAM v3. protocol scaffold
+│   ├── streaming/          # Streaming protocol scaffold
+│   ├── transport/          # NTCP2 (working), SSU2 (skeleton)
+│   ├── tunnel/             # Tunnel manager (local-only scaffold)
+│   ├── webui/              # Basic status web server
+│   ├── utils/              # Logging, helpers
+│   ├── router.ts           # Main router orchestration
+│   └── index.ts            # Entry point
+├── docs/                   # Peer discovery fix notes, test summaries
+├── examples/               # Test scripts
+├── TODO.md                 # Checkpoint-organized progress tracker
 ├── package.json
 └── tsconfig.json
 ```
 
-## Protocols Implemented
+## Protocols
 
-### NTCP2 (Noise XK)
-- X25519 ephemeral keys
-- ChaCha20/Poly1305 AEAD encryption
-- 3-message handshake
-- AES-256-CBC obfuscation for DPI resistance
+### NTCP2 (Noise XK) — Working
+- Full 3-message Noise XK handshake (SessionRequest → SessionCreated → SessionConfirmed)
+- AES-256-CBC obfuscation of ephemeral keys for DPI resistance
+- ChaCha20-Poly1305 AEAD for all handshake and data-phase frames
+- SipHash-2-4 length obfuscation in data phase
+- Data-phase key derivation (k_ab, k_ba, SipHash keys)
+- Termination block decoding with human-readable reason codes
+- Interop-tested against real i2pd peers on the production network
 
-### SSU2
-- X25519 key exchange
-- ChaCha20/Poly1305 authenticated encryption
-- UDP-based with connection migration
-- Relay support for NAT traversal
+### SSU2 — Skeleton
+- Basic SessionRequest/SessionCreated frame structure
+- Minimal ChaCha20-Poly1305 encrypt/decrypt
+- Missing: token exchange, SessionConfirmed, ack/nack, retry, key rotation, NAT traversal
 
-### I2NP Messages
-- DatabaseStore (1)
-- DatabaseLookup (2)
-- DatabaseSearchReply (3)
-- DeliveryStatus (10)
-- Garlic (11)
-- TunnelData (18)
-- TunnelGateway (19)
-- TunnelBuild (20)
-- TunnelBuildReply (21)
+### I2NP Messages — Partial
+- DatabaseStore (type 1) — create, parse, handle (with gzip decompression)
+- DatabaseLookup (type 2) — create, parse, handle
+- DeliveryStatus (type 10) — create, parse, handle
+- DatabaseSearchReply (type 3) — enumerated, no parser
+- Garlic (type 11) — enumerated, not processed
+- TunnelBuild/TunnelBuildReply (types 20/21) — receive but don't process build records
 
-### SAM v3.1
-- Session management
-- Stream connections
-- Forwarding
-- Destination generation
-- Naming lookups
+### SAM v3 — Scaffold
+- TCP server with HELLO, SESSION, STREAM, NAMING, DEST command parsing
+- Not wired to real tunnel infrastructure
 
-## Security
+## Cryptographic Primitives
 
-- **Encryption**: X25519 ECDH, ChaCha20/Poly1305 AEAD
-- **Hashing**: SHA-256 for all hash operations
-- **Key Derivation**: HKDF-SHA256
-- **Forward Secrecy**: Ephemeral keys for every session
-- **DPI Resistance**: Protocol obfuscation in NTCP2
+| Primitive | Library | Status |
+|-----------|---------|--------|
+| X25519 | `@noble/curves` | Working |
+| Ed25519 | `@noble/curves/ed25519` | Working |
+| ChaCha20-Poly1305 | Node.js `crypto` | Working |
+| AES-256-CBC | Node.js `crypto` | Working |
+| SHA-256 | Node.js `crypto` | Working |
+| HMAC-SHA256 | Node.js `crypto` | Working |
+| HKDF-SHA256 | Node.js `crypto` | Working |
+| SipHash-2-4 | Custom implementation | Working |
+| ElGamal | — | Not implemented |
+| DSA-SHA1 | — | Not implemented |
+| RedDSA / Blinding | — | Not implemented |
 
 ## Bandwidth Classes
 
 | Class | Bandwidth | Description |
 |-------|-----------|-------------|
-| K | < 12 KB/s | Very low bandwidth |
-| L | 12-48 KB/s | Low bandwidth |
-| M | 48-64 KB/s | Medium bandwidth |
-| N | 64-128 KB/s | High bandwidth |
-| O | 128-256 KB/s | Very high bandwidth |
-| P | 256-2000 KB/s | Extreme bandwidth |
-| X | > 2000 KB/s | Unlimited bandwidth |
+| K | < 12 KB/s | Very low |
+| L | 12–48 KB/s | Low |
+| M | 48–64 KB/s | Medium |
+| N | 64–128 KB/s | High |
+| O | 128–256 KB/s | Very high |
+| P | 256–2000 KB/s | Extreme |
+| X | > 2000 KB/s | Unlimited |
 
 ## License
 
@@ -220,9 +176,10 @@ MIT
 
 ## References
 
-- [I2P Specification](https://geti2p.net/spec/)
+- [I2P Technical Specification](https://geti2p.net/spec/)
 - [NTCP2 Specification](https://geti2p.net/spec/ntcp2)
 - [SSU2 Specification](https://geti2p.net/spec/ssu2)
 - [I2NP Specification](https://geti2p.net/spec/i2np)
 - [SAM v3 Specification](https://geti2p.net/en/docs/api/samv3)
 - [Noise Protocol Framework](https://noiseprotocol.org/)
+- [i2pd C++ Implementation](https://github.com/PurpleI2P/i2pd) (reference implementation used for interop testing)
