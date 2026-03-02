@@ -2,7 +2,8 @@ import { EventEmitter } from 'events';
 import { Crypto } from './crypto/index.js';
 import { RouterIdentity, RouterInfo, RouterAddress } from './data/router-info.js';
 import { LeaseSet } from './data/lease-set.js';
-import { parseLeaseSetI2P } from './data/lease-set-i2p.js';
+import { parseLeaseSetLS1, parseLeaseSetLS2 } from './data/lease-set-i2p.js';
+import { parseI2PRouterInfo } from './data/router-info-i2p.js';
 import { I2NPMessages, I2NPMessageType } from './i2np/messages.js';
 import { NetworkDatabase } from './netdb/index.js';
 import { TunnelManager, TunnelType } from './tunnel/manager.js';
@@ -354,18 +355,39 @@ export class I2PRouter extends EventEmitter {
     const publishedIV = Buffer.from(Crypto.randomBytes(16));
     this.ntcp2PublishedIV = publishedIV;
 
-    const ntcp2Opts = makeNtcp2PublishedOptions({
-      host,
-      port: ntcp2Port,
-      staticKey: this.identity!.identity.encryptionPublicKey,
-      ivB64: i2pBase64Encode(publishedIV),
-      v: '2',
-      caps
-    });
+    // For outbound-only (unpublished) routers, the NTCP2 address in the RI
+    // must contain ONLY s, v, and caps -- NO host, port, or i.
+    // If i is present, i2pd treats the address as "published" and checks
+    // that our endpoint IP matches the RI host.  With 0.0.0.0 that always
+    // fails → eNTCP2Banned.  See NTCP2 spec "Unpublished NTCP2 Address".
+    const isPublished = host !== '0.0.0.0' && host !== '::' && ntcp2Port > 0;
+
+    let ntcp2Opts: Record<string, string>;
+    if (isPublished) {
+      ntcp2Opts = makeNtcp2PublishedOptions({
+        host,
+        port: ntcp2Port,
+        staticKey: this.identity!.identity.encryptionPublicKey,
+        ivB64: i2pBase64Encode(publishedIV),
+        v: '2',
+        caps
+      });
+    } else {
+      // Unpublished: only s and v (and caps for capability advertisement)
+      ntcp2Opts = {
+        s: i2pBase64Encode(Buffer.from(this.identity!.identity.encryptionPublicKey)),
+        v: '2',
+      };
+      // Advertise IPv4 capability so remote peers know we support v4
+      const capStr = caps.includes('4') || !caps.includes('6') ? '4' : '6';
+      ntcp2Opts.caps = capStr;
+    }
 
     const addressesWire = [
       {
         transportStyle: 'NTCP2',
+        cost: isPublished ? 3 : 14,
+        dateMs: 0, // no expiration
         options: ntcp2Opts
       }
     ];
@@ -528,39 +550,53 @@ export class I2PRouter extends EventEmitter {
     const data = buf.subarray(offset);
 
     if (type === 0) {
-      // RouterInfo
-      try {
-        const routerInfo = RouterInfo.deserialize(data);
+      // RouterInfo — data arrives in standard I2P wire format; use the I2P-aware parser
+      // which correctly computes the IdentHash used as AES key in NTCP2.
+      const routerInfo = parseI2PRouterInfo(data);
+      if (routerInfo) {
         this.netDb.storeRouterInfo(routerInfo);
         logger.debug(
           `DatabaseStore (RouterInfo) for ${key.toString('hex').slice(0, 16)}...`,
           undefined,
           'Router'
         );
-      } catch (err) {
-        logger.warn('Failed to deserialize RouterInfo from DatabaseStore', { error: (err as Error).message }, 'Router');
+      } else {
+        logger.warn('Failed to deserialize RouterInfo from DatabaseStore (I2P parse failed)', undefined, 'Router');
       }
     } else if (type === 1) {
-      // LeaseSet / LeaseSet2 (parsed into our LeaseSet abstraction)
-      let leaseSet: LeaseSet | null = null;
-      try {
-        // Try classic LeaseSet (LS1) layout first.
-        leaseSet = LeaseSet.deserialize(data);
-      } catch {
-        // Fallback to LS2 parser (standard, unencrypted).
-        leaseSet = parseLeaseSetI2P(data, key);
-      }
+      // LeaseSet (LS1) — standard I2P LeaseSet wire format
+      const leaseSet = parseLeaseSetLS1(data, key);
 
       if (leaseSet) {
         this.netDb.storeLeaseSet(leaseSet);
         logger.debug(
-          `DatabaseStore (LeaseSet) for ${key.toString('hex').slice(0, 16)}...`,
+          `DatabaseStore (LS1) for ${key.toString('hex').slice(0, 16)}...`,
           undefined,
           'Router'
         );
       } else {
-        logger.warn('Failed to deserialize LeaseSet/LeaseSet2 from DatabaseStore', undefined, 'Router');
+        logger.warn('Failed to parse LeaseSet (LS1) from DatabaseStore', undefined, 'Router');
       }
+    } else if (type === 3) {
+      // Standard LeaseSet2 (LS2) wire format
+      const leaseSet = parseLeaseSetLS2(data, key);
+
+      if (leaseSet) {
+        this.netDb.storeLeaseSet(leaseSet);
+        logger.debug(
+          `DatabaseStore (LS2) for ${key.toString('hex').slice(0, 16)}...`,
+          undefined,
+          'Router'
+        );
+      } else {
+        logger.warn('Failed to parse LeaseSet2 (LS2) from DatabaseStore', undefined, 'Router');
+      }
+    } else if (type === 5) {
+      // Encrypted LeaseSet2 — not yet implemented
+      logger.debug(`DatabaseStore: Encrypted LeaseSet2 for ${key.toString('hex').slice(0, 16)}... (not implemented)`, undefined, 'Router');
+    } else if (type === 7) {
+      // Meta LeaseSet2 — not yet implemented
+      logger.debug(`DatabaseStore: Meta LeaseSet2 for ${key.toString('hex').slice(0, 16)}... (not implemented)`, undefined, 'Router');
     } else {
       logger.debug(`DatabaseStore with unsupported type=${type}`, undefined, 'Router');
     }
@@ -677,7 +713,7 @@ export class I2PRouter extends EventEmitter {
     const msg = I2NPMessages.createDatabaseLookup(
       targetHash,
       fromHash,
-      0, // lookup type: router info
+      2, // lookup type 2 = Exploration (peer discovery mode; floodfills return closest known floodfills)
       []
     );
     const wire = I2NPMessages.serializeMessage(msg);

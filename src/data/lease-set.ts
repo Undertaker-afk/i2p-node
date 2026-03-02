@@ -1,4 +1,3 @@
-import { createHash } from 'crypto';
 import { RouterIdentity } from './router-info.js';
 
 export interface DeserializedLease {
@@ -72,8 +71,10 @@ export class LeaseSet {
   }
 
   getHash(): Buffer {
-    const data = this.serialize(true);
-    return createHash('sha256').update(data).digest();
+    // The LeaseSet hash is the ident hash = SHA256(identity bytes).
+    // When the destination has a precomputed hash (set from I2P wire data)
+    // this returns the correct I2P-compatible ident hash.
+    return this.destination.getHash();
   }
 
   getExpiration(): number {

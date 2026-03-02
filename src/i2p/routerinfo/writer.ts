@@ -27,7 +27,7 @@ function u64be(n: number): Buffer {
 
 function writeAddress(addr: RouterInfoAddress): Buffer {
   const cost = addr.cost ?? 5;
-  const dateMs = addr.dateMs ?? Date.now();
+  const dateMs = addr.dateMs ?? 0; // 0 = no expiration (matches i2pd)
   const style = addr.transportStyle;
 
   const styleStr = writeI2PString(style);

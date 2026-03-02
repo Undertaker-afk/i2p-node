@@ -259,6 +259,18 @@ export class NetworkDatabase extends EventEmitter {
         try {
           const data = await fs.promises.readFile(path.join(netDbPath, file));
           const routerInfo = RouterInfo.deserialize(data);
+
+          // Restore the correct IdentHash from the filename.
+          // When saved to disk, the filename is routerInfo-<identHash>.dat where
+          // identHash was computed correctly at save-time.  The custom serialization
+          // format does NOT embed the raw identity bytes so getHash() would otherwise
+          // recompute from the custom layout and return a wrong value — breaking AES key
+          // derivation in NTCP2 handshakes.
+          const hashHex = file.replace('routerInfo-', '').replace('.dat', '');
+          if (/^[0-9a-f]{64}$/.test(hashHex)) {
+            routerInfo.identity.setHash(Buffer.from(hashHex, 'hex'));
+          }
+
           this.storeRouterInfo(routerInfo);
           loaded++;
         } catch (err) {

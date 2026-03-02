@@ -13,7 +13,7 @@ import { logger } from '../utils/logger.js';
  * non-empty signature buffer elsewhere if needed.
  */
 
-function getIdentityLength(buf: Buffer): number {
+export function getIdentityLength(buf: Buffer): number {
   // Mirrors GetIdentityBufferLen in Identity.cpp:
   // DEFAULT_IDENTITY_SIZE (387 bytes) + certificate length (last 2 bytes)
   const DEFAULT_IDENTITY_SIZE = 387;

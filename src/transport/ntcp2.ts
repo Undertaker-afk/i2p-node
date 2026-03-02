@@ -99,6 +99,7 @@ export class NTCP2Transport extends EventEmitter {
 
   constructor(options: NTCP2Options = {}) {
     super();
+    this.setMaxListeners(100); // Many concurrent outbound connections
     this.options = {
       host: options.host ?? '0.0.0.0',
       port: options.port ?? 12345,
@@ -154,11 +155,23 @@ export class NTCP2Transport extends EventEmitter {
     const { s, i } = this.extractRemoteNtcp2Keys(remoteRouterInfo, host, port);
     const remoteRouterHash = Buffer.from(remoteRouterInfo.getRouterHash());
 
+    const sessionId = `${host}:${port}`;
+
+    // If we already have an established session to this peer, reuse it.
+    const existing = this.sessions.get(sessionId);
+    if (existing && existing.state === 'established' && !existing.socket.destroyed) {
+      return;
+    }
+    // If a previous session exists but isn't established, destroy it first.
+    if (existing) {
+      existing.socket.destroy();
+      this.sessions.delete(sessionId);
+    }
+
     return new Promise((resolve, reject) => {
       const socket = new Socket();
       const timeoutMs = this.options.connectTimeoutMs ?? 8000;
       socket.setTimeout(timeoutMs);
-      const sessionId = `${host}:${port}`;
       const session: NTCP2Session = {
         socket,
         state: 'init',
@@ -210,6 +223,7 @@ export class NTCP2Transport extends EventEmitter {
 
       socket.connect(port, host, async () => {
         try {
+          if (DEBUG) console.log(`NTCP2 TCP connected to ${host}:${port}`);
           await this.sendSessionRequest(sessionId);
         } catch (e) {
           fail(e);
@@ -226,6 +240,12 @@ export class NTCP2Transport extends EventEmitter {
     // NTCP2 data-phase framing and AEAD keys end-to-end.
     const framePlain = encodeBlocks([{ type: 3, data }]);
     this.sendDataFrame(session, framePlain);
+  }
+
+  /** Check if we have an active established session to a peer */
+  hasSession(host: string, port: number): boolean {
+    const session = this.sessions.get(`${host}:${port}`);
+    return !!session && session.state === 'established' && !session.socket.destroyed;
   }
 
   getBoundPort(): number | null {
@@ -259,6 +279,7 @@ export class NTCP2Transport extends EventEmitter {
         break;
       }
     } catch (err) {
+      if (DEBUG) console.log(`NTCP2 processing error [${sessionId}] state=${session.state}:`, (err as Error).message);
       logger.warn('NTCP2 processing error', { error: (err as Error).message, sessionId }, 'NTCP2');
       session.socket.destroy();
       this.sessions.delete(sessionId);
@@ -280,6 +301,15 @@ export class NTCP2Transport extends EventEmitter {
     hs.ePriv = eph.privateKey;
     hs.ePub = Buffer.from(eph.publicKey);
 
+    if (DEBUG) {
+      console.log('NTCP2 m1 remoteStaticKey (s)', session.remoteNtcp2Static.toString('hex'));
+      console.log('NTCP2 m1 remoteRouterHash (AES key)', session.remoteRouterHash.toString('hex'));
+      console.log('NTCP2 m1 remoteNtcp2IV (AES iv)', session.remoteNtcp2IV.toString('hex'));
+      console.log('NTCP2 m1 ePub (X plaintext)', hs.ePub.toString('hex'));
+      console.log('NTCP2 m1 h after init', hs.h.toString('hex'));
+      console.log('NTCP2 m1 ck after init', hs.ck.toString('hex'));
+    }
+
     // MixHash(epub)
     hs.h = sha256Concat(hs.h, hs.ePub);
 
@@ -287,10 +317,17 @@ export class NTCP2Transport extends EventEmitter {
     const encX = Crypto.aesEncryptCBC(hs.ePub, session.remoteRouterHash, session.remoteNtcp2IV);
     hs.aesIV2 = encX.subarray(16, 32);
 
+    if (DEBUG) {
+      console.log('NTCP2 m1 encX (AES-CBC output)', encX.toString('hex'));
+      console.log('NTCP2 m1 h after MixHash(epub)', hs.h.toString('hex'));
+    }
+
     // MixKey(DH(e, rs))
     const dh = Crypto.x25519DiffieHellman(hs.ePriv, session.remoteNtcp2Static);
+    if (DEBUG) console.log('NTCP2 m1 DH result', Buffer.from(dh).toString('hex'));
     mixKey(hs, dh);
     if (DEBUG) console.log('NTCP2 m1 derived k', hs.k?.toString('hex'));
+    if (DEBUG) console.log('NTCP2 m1 derived ck', hs.ck.toString('hex'));
     if (DEBUG) console.log('NTCP2 m1 ad h', hs.h.toString('hex'));
 
     // options block
@@ -447,6 +484,8 @@ export class NTCP2Transport extends EventEmitter {
     // send SessionConfirmed immediately
     this.sendSessionConfirmed(sessionId, session);
     session.state = 'established';
+    // Clear the connect timeout so the socket doesn't fire idle 'timeout' events.
+    session.socket.setTimeout(0);
     this.emit('established', { sessionId });
     return true;
   }
@@ -555,6 +594,8 @@ export class NTCP2Transport extends EventEmitter {
   }
 
   private handleClose(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (DEBUG && session) console.log(`NTCP2 session closed [${sessionId}] state=${session.state}`);
     this.sessions.delete(sessionId);
     this.emit('close', { sessionId });
   }
