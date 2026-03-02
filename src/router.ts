@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import { gunzipSync } from 'zlib';
 import { Crypto } from './crypto/index.js';
 import { RouterIdentity, RouterInfo, RouterAddress } from './data/router-info.js';
 import { LeaseSet } from './data/lease-set.js';
@@ -550,9 +551,22 @@ export class I2PRouter extends EventEmitter {
     const data = buf.subarray(offset);
 
     if (type === 0) {
-      // RouterInfo — data arrives in standard I2P wire format; use the I2P-aware parser
-      // which correctly computes the IdentHash used as AES key in NTCP2.
-      const routerInfo = parseI2PRouterInfo(data);
+      // RouterInfo — format: size(2) + gzip-compressed RouterInfo
+      if (data.length < 2) return;
+      const compressedSize = data.readUInt16BE(0);
+      if (compressedSize > data.length - 2) {
+        logger.warn(`DatabaseStore: compressed RI size ${compressedSize} exceeds remaining ${data.length - 2}`, undefined, 'Router');
+        return;
+      }
+      const compressed = data.subarray(2, 2 + compressedSize);
+      let uncompressed: Buffer;
+      try {
+        uncompressed = gunzipSync(compressed);
+      } catch (err) {
+        logger.warn(`DatabaseStore: gzip decompression failed: ${(err as Error).message}`, undefined, 'Router');
+        return;
+      }
+      const routerInfo = parseI2PRouterInfo(uncompressed);
       if (routerInfo) {
         this.netDb.storeRouterInfo(routerInfo);
         logger.debug(

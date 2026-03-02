@@ -30,8 +30,8 @@ const netDb = router.getNetworkDatabase();
 const allRouters = netDb.getAllRouterInfos();
 console.log(`Reseeded ${allRouters.length} routers`);
 
-// Find first 30 peers with usable NTCP2 address
-const candidates = [];
+// Find all peers with usable NTCP2 address, then shuffle and take 30
+const allCandidates = [];
 for (const ri of allRouters) {
   for (const a of ri.addresses) {
     if (!a.transportStyle.toUpperCase().startsWith('NTCP')) continue;
@@ -40,11 +40,16 @@ for (const ri of allRouters) {
     if (!a.options.s || !a.options.i || !a.options.port) continue;
     const port = parseInt(a.options.port, 10);
     if (!port || isNaN(port)) continue;
-    candidates.push({ ri, host, port, s: a.options.s, i: a.options.i });
+    allCandidates.push({ ri, host, port, s: a.options.s, i: a.options.i });
     break;
   }
-  if (candidates.length >= 30) break;
 }
+// Fisher-Yates shuffle
+for (let i = allCandidates.length - 1; i > 0; i--) {
+  const j = Math.floor(Math.random() * (i + 1));
+  [allCandidates[i], allCandidates[j]] = [allCandidates[j], allCandidates[i]];
+}
+const candidates = allCandidates.slice(0, 30);
 
 if (!candidates.length) {
   console.error('ERROR: no usable NTCP2 peer found');
