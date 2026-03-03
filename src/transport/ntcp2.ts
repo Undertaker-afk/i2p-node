@@ -44,6 +44,14 @@ function dumpNtcp2Handshake(hs?: NTCP2Handshake): Record<string, string | number
   };
 }
 
+function normalizeHost(host?: string): string | undefined {
+  if (!host) return undefined;
+  if (host.startsWith('[') && host.endsWith(']')) {
+    return host.slice(1, -1).toLowerCase();
+  }
+  return host.toLowerCase();
+}
+
 function dumpNtcp2DataPhase(dp?: NTCP2DataPhase): Record<string, string | number | boolean | null | undefined> {
   if (!dp) return { present: false };
   return {
@@ -869,10 +877,13 @@ export class NTCP2Transport extends EventEmitter {
 
     if (hostHint && typeof portHint === 'number') {
       const portStr = String(portHint);
+      const normalizedHint = normalizeHost(hostHint);
       const match = addrs.find((a) => {
-        const h = a.options.host;
+        const h = normalizeHost(a.options.host);
         const p = a.options.port != null ? String(a.options.port) : undefined;
-        return h === hostHint && p === portStr;
+        if (p !== portStr) return false;
+        if (!h || !normalizedHint) return true;
+        return h === normalizedHint;
       });
       if (match) {
         addr = match;
