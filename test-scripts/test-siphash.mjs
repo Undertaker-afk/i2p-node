@@ -3,7 +3,7 @@
  * This test uses official test vectors from https://github.com/veorq/SipHash
  */
 
-const { Crypto } = await import('./dist/crypto/index.js');
+const { Crypto } = await import('../dist/crypto/index.js');
 
 console.log('Testing SipHash-2-4 implementation using bsip library...\n');
 

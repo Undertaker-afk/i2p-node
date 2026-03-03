@@ -6,9 +6,9 @@
  */
 
 import { createHash, randomBytes } from 'crypto';
-import { buildIdentityExEd25519X25519 } from './dist/i2p/identity/identity-ex.js';
-import { parseLeaseSetLS1, parseLeaseSetLS2, getSigningKeyInfo } from './dist/data/lease-set-i2p.js';
-import { getIdentityLength } from './dist/data/router-info-i2p.js';
+import { buildIdentityExEd25519X25519 } from '../dist/i2p/identity/identity-ex.js';
+import { parseLeaseSetLS1, parseLeaseSetLS2, getSigningKeyInfo } from '../dist/data/lease-set-i2p.js';
+import { getIdentityLength } from '../dist/data/router-info-i2p.js';
 
 let pass = 0;
 let fail = 0;
@@ -265,8 +265,8 @@ console.log('\n=== Test 7: LS1 zero leases ===');
 console.log('\n=== Test 8: LeaseSet.getHash() ===');
 {
   // Import the LeaseSet class
-  const { LeaseSet, Lease } = await import('./dist/data/lease-set.js');
-  const { RouterIdentity } = await import('./dist/data/router-info.js');
+  const { LeaseSet, Lease } = await import('../dist/data/lease-set.js');
+  const { RouterIdentity } = await import('../dist/data/router-info.js');
 
   const identity = new RouterIdentity(randomBytes(32), randomBytes(32));
   const preHash = randomBytes(32);

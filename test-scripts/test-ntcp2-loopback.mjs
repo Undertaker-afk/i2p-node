@@ -7,13 +7,13 @@ import { x25519 } from '@noble/curves/ed25519';
 import { ed25519 } from '@noble/curves/ed25519';
 
 // Build path: point to compiled dist/
-const { NTCP2Transport } = await import('./dist/transport/ntcp2.js');
-const { Crypto } = await import('./dist/crypto/index.js');
-const { parseI2PRouterInfo } = await import('./dist/data/router-info-i2p.js');
-const { RouterInfo, RouterAddress, RouterIdentity } = await import('./dist/data/router-info.js');
-const { buildIdentityExEd25519X25519 } = await import('./dist/i2p/identity/identity-ex.js');
-const { writeRouterInfoEd25519, makeNtcp2PublishedOptions } = await import('./dist/i2p/routerinfo/writer.js');
-const { i2pBase64Encode } = await import('./dist/i2p/base64.js');
+const { NTCP2Transport } = await import('../dist/transport/ntcp2.js');
+const { Crypto } = await import('../dist/crypto/index.js');
+const { parseI2PRouterInfo } = await import('../dist/data/router-info-i2p.js');
+const { RouterInfo, RouterAddress, RouterIdentity } = await import('../dist/data/router-info.js');
+const { buildIdentityExEd25519X25519 } = await import('../dist/i2p/identity/identity-ex.js');
+const { writeRouterInfoEd25519, makeNtcp2PublishedOptions } = await import('../dist/i2p/routerinfo/writer.js');
+const { i2pBase64Encode } = await import('../dist/i2p/base64.js');
 
 // ─── Build Bob's identity and keys ────────────────────────────────────────────
 const BOB_PORT = 14777;
