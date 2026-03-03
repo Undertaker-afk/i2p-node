@@ -36,15 +36,15 @@ Start router → establish sessions → build tunnels → resolve LeaseSet via b
 - [~] Some peers still close with `socket closed before handshake established` (normal for NAT/offline peers)
 - [ ] Inbound session handling (Bob side) — implemented but untested against real peers
 
-### Checkpoint C — SSU2 Session Establishment (~20%)
+### Checkpoint C — SSU2 Session Establishment (~70%)
 
-- [~] Skeleton SessionRequest/SessionCreated (no token exchange, no SessionConfirmed)
-- [~] Minimal data packet encrypt/decrypt (ChaCha20-Poly1305, incrementing nonce)
-- [ ] Token exchange (TokenRequest/NewToken)
-- [ ] SessionConfirmed message
-- [ ] Ack/nack protocol
-- [ ] Retry and timeout handling
-- [ ] Key rotation
+- [x] SessionRequest/SessionCreated with encrypted handshake payloads
+- [x] Minimal data packet encrypt/decrypt (ChaCha20-Poly1305, packet number nonce)
+- [x] Token exchange (`NewToken` + request retry with token)
+- [x] SessionConfirmed message
+- [x] Ack/nack protocol (lightweight packet-number based)
+- [x] Retry and timeout handling (handshake + data retransmit)
+- [x] Key rotation (periodic HMAC-based rekey)
 - [ ] NAT traversal, introducers, peer testing
 
 ### Checkpoint D — I2NP + NetDb Messaging (~75%)
@@ -141,4 +141,3 @@ Tunnels are the biggest blocker. Once ECIES build records are sent over real NTC
 
 - [x] `isOnline()` — router count ≥ 90, floodfills ≥ 5, addressed routers ≥ 10
 - [x] Web UI status endpoint and basic console
-

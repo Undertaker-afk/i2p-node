@@ -125,10 +125,13 @@ i2p-node/
 - Termination block decoding with human-readable reason codes
 - Interop-tested against real i2pd peers on the production network
 
-### SSU2 — Skeleton
-- Basic SessionRequest/SessionCreated frame structure
-- Minimal ChaCha20-Poly1305 encrypt/decrypt
-- Missing: token exchange, SessionConfirmed, ack/nack, retry, key rotation, NAT traversal
+### SSU2 — Partial
+- SessionRequest/SessionCreated/SessionConfirmed handshake flow
+- Lightweight token exchange (`NewToken` + retried SessionRequest)
+- ChaCha20-Poly1305 encrypted data packets with packet-number nonces
+- Basic ack/nack and retransmission behavior
+- Periodic send/receive key rotation
+- Missing: NAT traversal, introducers, peer testing against broad public peers
 
 ### I2NP Messages — Partial
 - DatabaseStore (type 1) — create, parse, handle (with gzip decompression)
