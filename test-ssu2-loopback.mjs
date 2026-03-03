@@ -109,7 +109,7 @@ async function main() {
   // ── Start Alice (initiator) ─────────────────────────────────────────────────
   const aliceTransport = new SSU2Transport({
     host: '127.0.0.1',
-    port: ALICE_PORT + 1000, // ephemeral local bind port
+    port: 0,        // let the OS assign an available ephemeral port
     staticPrivateKey: alice.staticPriv,
     staticPublicKey:  alice.staticPub,
     introKey:         alice.introKey,
@@ -128,7 +128,7 @@ async function main() {
   });
 
   await aliceTransport.start();
-  console.log(`Alice SSU2 listening on 127.0.0.1:${ALICE_PORT + 1000}`);
+  console.log(`Alice SSU2 listening on 127.0.0.1 (OS-assigned ephemeral port)`);
 
   const bobRI = fakeRouterInfo(bob);
 

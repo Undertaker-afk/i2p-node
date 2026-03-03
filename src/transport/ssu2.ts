@@ -129,7 +129,7 @@ export interface SSU2Session {
 
   // Retransmission
   pendingHandshakePkt?: Buffer; // encrypted handshake packet to retransmit
-  retransmitTimer?: ReturnType<typeof setInterval>;
+  retransmitTimer?: ReturnType<typeof setTimeout>;
   retransmitCount: number;
   handshakeTimedOut: boolean;
 }
@@ -209,9 +209,9 @@ export class SSU2Transport extends EventEmitter {
     const remoteStatic = extractSsu2Key(remoteRI, 's');
     const remoteIntro  = extractSsu2Key(remoteRI, 'i');
 
-    // Generate our two connection IDs
+    // Generate our two connection IDs (must differ; set LSB on recvConnId to guarantee)
     const sendConnId = randomConnId();
-    const recvConnId = randomConnId() | 1n; // ensure different
+    const recvConnId = randomConnId() | 1n;
 
     // Init Noise state with Bob's static key
     const ns = initNoiseState(remoteStatic);
@@ -1073,41 +1073,36 @@ export class SSU2Transport extends EventEmitter {
     this.byRecvConnId.delete(s.recvConnId);
   }
 
-  private setupRetransmit(s: SSU2Session, intervalMs: number): void {
+  private setupRetransmit(s: SSU2Session, firstDelayMs: number): void {
     this.clearRetransmit(s);
-    s.retransmitTimer = setInterval(() => {
-      if (s.handshakeTimedOut) {
-        this.clearRetransmit(s);
-        return;
-      }
-      if (!s.pendingHandshakePkt) return;
 
-      s.retransmitCount++;
-      if (s.retransmitCount > 3) {
-        // Timeout
-        s.handshakeTimedOut = true;
-        this.clearRetransmit(s);
-        this.emit('handshakeTimeout', { sessionId: sessionKey(s.address, s.port) });
-        return;
-      }
+    const schedule = (delayMs: number) => {
+      s.retransmitTimer = setTimeout(() => {
+        if (s.handshakeTimedOut || s.state === 'established') return;
+        if (!s.pendingHandshakePkt) return;
 
-      const nextInterval =
-        s.retransmitCount === 1 ? RETRANSMIT_2 :
-        s.retransmitCount === 2 ? RETRANSMIT_3 : HANDSHAKE_TIMEOUT;
-      clearInterval(s.retransmitTimer);
-      s.retransmitTimer = setInterval(() => {
-        if (s.pendingHandshakePkt) {
-          this.sendRaw(s.pendingHandshakePkt, s.address, s.port).catch(() => {});
+        s.retransmitCount++;
+        if (s.retransmitCount > 3) {
+          s.handshakeTimedOut = true;
+          this.emit('handshakeTimeout', { sessionId: sessionKey(s.address, s.port) });
+          return;
         }
-      }, nextInterval);
 
-      this.sendRaw(s.pendingHandshakePkt, s.address, s.port).catch(() => {});
-    }, intervalMs);
+        this.sendRaw(s.pendingHandshakePkt, s.address, s.port).catch(() => {});
+
+        const nextDelay =
+          s.retransmitCount === 1 ? RETRANSMIT_2 :
+          s.retransmitCount === 2 ? RETRANSMIT_3 : HANDSHAKE_TIMEOUT;
+        schedule(nextDelay);
+      }, delayMs);
+    };
+
+    schedule(firstDelayMs);
   }
 
   private clearRetransmit(s: SSU2Session): void {
     if (s.retransmitTimer) {
-      clearInterval(s.retransmitTimer);
+      clearTimeout(s.retransmitTimer);
       s.retransmitTimer = undefined;
     }
   }
@@ -1427,7 +1422,8 @@ function sha256(data: Buffer | Uint8Array): Buffer {
 
 function makeNonce(n: number): Uint8Array {
   const nonce = new Uint8Array(12);
-  // First 4 bytes = 0, last 8 bytes = n as 64-bit LE
+  // Spec: first 4 bytes = 0; bytes 4-11 = 64-bit LE counter.
+  // Since packet numbers are 32-bit, bytes 4-7 = n as 32-bit LE, bytes 8-11 = 0.
   nonce[4] = n & 0xff;
   nonce[5] = (n >>> 8)  & 0xff;
   nonce[6] = (n >>> 16) & 0xff;
