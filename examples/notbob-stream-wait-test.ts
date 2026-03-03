@@ -1,6 +1,6 @@
 import { execSync } from 'child_process';
-import { I2PRouter } from '../router.js';
-import { logger, LogLevel } from '../utils/logger.js';
+import { I2PRouter } from '../dist/router.js';
+import { logger, LogLevel } from '../dist/utils/logger.js';
 
 const NOTBOB_B32 = 'nytzrhrjjfsutowojvxi7hphesskpqqr65wpistz6wa7cpajhp7a.b32.i2p';
 const NTCP2_PORT = 12345; // must match router options

@@ -1,11 +1,11 @@
-import NTCP2Transport from '../transport/ntcp2.js';
-import { Reseeder } from '../netdb/reseed.js';
-import { parseI2PRouterInfo } from '../data/router-info-i2p.js';
-import { Crypto } from '../crypto/index.js';
+import NTCP2Transport from '../dist/transport/ntcp2.js';
+import { Reseeder } from '../dist/netdb/reseed.js';
+import { parseI2PRouterInfo } from '../dist/data/router-info-i2p.js';
+import { Crypto } from '../dist/crypto/index.js';
 import { ed25519 } from '@noble/curves/ed25519';
-import { buildIdentityExEd25519X25519 } from '../i2p/identity/identity-ex.js';
-import { writeRouterInfoEd25519, makeNtcp2PublishedOptions } from '../i2p/routerinfo/writer.js';
-import { i2pBase64Encode } from '../i2p/base64.js';
+import { buildIdentityExEd25519X25519 } from '../dist/i2p/identity/identity-ex.js';
+import { writeRouterInfoEd25519, makeNtcp2PublishedOptions } from '../dist/i2p/routerinfo/writer.js';
+import { i2pBase64Encode } from '../dist/i2p/base64.js';
 import https from 'https';
 
 async function getPublicIPv4(): Promise<string | null> {

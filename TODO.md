@@ -141,3 +141,10 @@ Tunnels are the biggest blocker. Once ECIES build records are sent over real NTC
 
 - [x] `isOnline()` — router count ≥ 90, floodfills ≥ 5, addressed routers ≥ 10
 - [x] Web UI status endpoint and basic console
+
+## Repository Maintenance
+
+- [x] Consolidate example test/smoke **source** files into top-level `examples/`.
+- [x] Update moved test imports to use `../dist/...` runtime paths so they continue to run via `ts-node --esm` after build.
+- [x] Keep compiled outputs out of source test moves (`dist/**` untouched).
+
