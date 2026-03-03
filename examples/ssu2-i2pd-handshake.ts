@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
-import SSU2Transport from '../transport/ssu2.js';
-import { parseI2PRouterInfo } from '../data/router-info-i2p.js';
-import { Crypto } from '../crypto/index.js';
-import { RouterInfo } from '../data/router-info.js';
+import SSU2Transport from '../src/transport/ssu2.js';
+import { parseI2PRouterInfo } from '../src/data/router-info-i2p.js';
+import { Crypto } from '../src/crypto/index.js';
+import { RouterInfo } from '../src/data/router-info.js';
 
 async function pickRemoteSsu2Peer(): Promise<{ ri: RouterInfo; host: string; port: number }> {
   const netDbRoot = 'C:\\Users\\floga\\AppData\\Roaming\\i2pd\\netDb';

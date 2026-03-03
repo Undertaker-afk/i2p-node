@@ -125,10 +125,9 @@ i2p-node/
 
 ### Example & Test File Layout
 
-- `examples/` now contains the source test/smoke scripts (including the moved TypeScript handshake and stream tests).
-- `src/examples/` is reserved for non-test router usage examples that are built with the TypeScript project.
-- Moved TypeScript tests in `examples/` import router runtime modules from `dist/` so they can run without changing `tsconfig` include/rootDir.
-- Compiled artifacts in `dist/` are intentionally excluded from this source-test layout.
+- `examples/` contains smoke tests plus runnable TypeScript usage/handshake examples.
+- Example scripts in `examples/` may import from either `dist/` (built runtime) or `src/` (direct TypeScript execution), depending on their purpose.
+- Compiled artifacts in `dist/` are intentionally excluded from this source-first example layout.
 
 ## Protocols
 

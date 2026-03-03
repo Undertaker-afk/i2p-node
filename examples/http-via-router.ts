@@ -1,5 +1,5 @@
 import http from 'http';
-import { I2PRouter } from '../router.js';
+import { I2PRouter } from '../src/router.js';
 
 async function main(): Promise<void> {
   const b32 = process.argv[2] || 'nytzrhrjjfsutowojvxi7hphesskpqqr65wpistz6wa7cpajhp7a.b32.i2p';
