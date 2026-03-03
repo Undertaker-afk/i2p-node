@@ -1,13 +1,13 @@
 import fs from 'fs';
 import path from 'path';
-import NTCP2Transport from '../transport/ntcp2.js';
-import { parseI2PRouterInfo } from '../data/router-info-i2p.js';
-import { Crypto } from '../crypto/index.js';
+import NTCP2Transport from '../src/transport/ntcp2.js';
+import { parseI2PRouterInfo } from '../src/data/router-info-i2p.js';
+import { Crypto } from '../src/crypto/index.js';
 import { ed25519 } from '@noble/curves/ed25519';
-import { buildIdentityExEd25519X25519 } from '../i2p/identity/identity-ex.js';
-import { writeRouterInfoEd25519, makeNtcp2PublishedOptions } from '../i2p/routerinfo/writer.js';
-import { i2pBase64Encode } from '../i2p/base64.js';
-import { RouterInfo } from '../data/router-info.js';
+import { buildIdentityExEd25519X25519 } from '../src/i2p/identity/identity-ex.js';
+import { writeRouterInfoEd25519, makeNtcp2PublishedOptions } from '../src/i2p/routerinfo/writer.js';
+import { i2pBase64Encode } from '../src/i2p/base64.js';
+import { RouterInfo } from '../src/data/router-info.js';
 
 async function pickRemoteNtcp2Peer(): Promise<{ ri: RouterInfo; host: string; port: number }> {
   const netDbRoot = 'C:\\Users\\floga\\AppData\\Roaming\\i2pd\\netDb';
