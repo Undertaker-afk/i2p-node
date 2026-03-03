@@ -93,6 +93,12 @@ export interface SSU2Session {
   lastActivity: number;
 }
 
+function writeSsu2Header(buf: Buffer, type: SSU2MessageType, connIdDest: bigint, connIdSrc: bigint): void {
+  buf.writeUInt8(type, 0);
+  buf.writeBigUInt64BE(connIdDest, 1);
+  buf.writeBigUInt64BE(connIdSrc, 9);
+}
+
 function dumpSsu2HandshakeState(hs: HandshakeState): Record<string, string | number | null | undefined> {
   return {
     k: hex(hs.k),
@@ -405,7 +411,7 @@ export class SSU2Transport extends EventEmitter {
         port: rinfo.port,
         state: 'init',
         isInitiator: false,
-        connIdLocal: connIdDest,
+        connIdLocal: this.generateConnId(),
         connIdRemote: connIdSrc,
         hs,
         sendNonce: 0,
@@ -460,9 +466,7 @@ export class SSU2Transport extends EventEmitter {
 
     const token = s.token ?? 0n;
     const buf = Buffer.alloc(1 + 8 + 8 + 8 + 32 + ct.length);
-    buf.writeUInt8(SSU2MessageType.SessionRequest, 0);
-    buf.writeBigUInt64BE(s.connIdLocal, 1);
-    buf.writeBigUInt64BE(s.connIdRemote, 9);
+    writeSsu2Header(buf, SSU2MessageType.SessionRequest, s.connIdRemote, s.connIdLocal);
     buf.writeBigUInt64BE(token, 17);
     Buffer.from(hs.ePub!).copy(buf, 25);
     ct.copy(buf, 57);
@@ -516,8 +520,7 @@ export class SSU2Transport extends EventEmitter {
     if (plain.readUInt8(0) !== (this.options.netId & 0xff) || plain.readUInt8(1) !== 1) return;
 
     s.state = 'created_sent';
-    s.connIdRemote = msg.readBigUInt64BE(1);
-    s.connIdLocal = msg.readBigUInt64BE(9);
+    s.connIdRemote = msg.readBigUInt64BE(9);
     logSsu2InterfaceSnapshot('session-request-accepted', this.sessionKey(s.address, s.port), s);
 
     const reply = this.buildSessionCreated(s);
@@ -526,9 +529,7 @@ export class SSU2Transport extends EventEmitter {
 
   private buildNewToken(s: SSU2Session, token: bigint): Buffer {
     const buf = Buffer.alloc(1 + 8 + 8 + 8);
-    buf.writeUInt8(SSU2MessageType.NewToken, 0);
-    buf.writeBigUInt64BE(s.connIdLocal, 1);
-    buf.writeBigUInt64BE(s.connIdRemote, 9);
+    writeSsu2Header(buf, SSU2MessageType.NewToken, s.connIdRemote, s.connIdLocal);
     buf.writeBigUInt64BE(token, 17);
     return buf;
   }
@@ -560,9 +561,7 @@ export class SSU2Transport extends EventEmitter {
     const ct = Buffer.from(Crypto.encryptChaCha20Poly1305(hs.k!, nonce, plain, hs.h));
 
     const buf = Buffer.alloc(1 + 8 + 8 + ct.length);
-    buf.writeUInt8(SSU2MessageType.SessionCreated, 0);
-    buf.writeBigUInt64BE(s.connIdLocal, 1);
-    buf.writeBigUInt64BE(s.connIdRemote, 9);
+    writeSsu2Header(buf, SSU2MessageType.SessionCreated, s.connIdRemote, s.connIdLocal);
     ct.copy(buf, 17);
     return buf;
   }
@@ -579,6 +578,11 @@ export class SSU2Transport extends EventEmitter {
       return;
     }
     if (plain.toString('utf8') !== 'CREATED') return;
+
+    const connIdSrc = msg.readBigUInt64BE(9);
+    if (connIdSrc !== 0n) {
+      s.connIdRemote = connIdSrc;
+    }
 
     const { sendKey, recvKey } = deriveDirectionalKeys(hs.k!, true);
     s.sendKey = sendKey;
@@ -603,9 +607,7 @@ export class SSU2Transport extends EventEmitter {
     const ct = Buffer.from(Crypto.encryptChaCha20Poly1305(s.sendKey!, nonce, plain));
 
     const buf = Buffer.alloc(1 + 8 + 8 + ct.length);
-    buf.writeUInt8(SSU2MessageType.SessionConfirmed, 0);
-    buf.writeBigUInt64BE(s.connIdLocal, 1);
-    buf.writeBigUInt64BE(s.connIdRemote, 9);
+    writeSsu2Header(buf, SSU2MessageType.SessionConfirmed, s.connIdRemote, s.connIdLocal);
     ct.copy(buf, 17);
     return buf;
   }
@@ -639,9 +641,7 @@ export class SSU2Transport extends EventEmitter {
     s.sendNonce++;
     const ct = Buffer.from(Crypto.encryptChaCha20Poly1305(s.sendKey!, nonce, payload));
     const buf = Buffer.alloc(1 + 8 + 8 + 4 + ct.length);
-    buf.writeUInt8(SSU2MessageType.Data, 0);
-    buf.writeBigUInt64BE(s.connIdLocal, 1);
-    buf.writeBigUInt64BE(s.connIdRemote, 9);
+    writeSsu2Header(buf, SSU2MessageType.Data, s.connIdRemote, s.connIdLocal);
     buf.writeUInt32BE(packetNumber >>> 0, 17);
     ct.copy(buf, 21);
     return buf;
@@ -686,9 +686,7 @@ export class SSU2Transport extends EventEmitter {
     const ct = Buffer.from(Crypto.encryptChaCha20Poly1305(s.sendKey!, nonce, plain));
 
     const buf = Buffer.alloc(1 + 8 + 8 + 12 + ct.length);
-    buf.writeUInt8(SSU2MessageType.Ack, 0);
-    buf.writeBigUInt64BE(s.connIdLocal, 1);
-    buf.writeBigUInt64BE(s.connIdRemote, 9);
+    writeSsu2Header(buf, SSU2MessageType.Ack, s.connIdRemote, s.connIdLocal);
     nonce.copy(buf, 17);
     ct.copy(buf, 29);
     return buf;
@@ -717,9 +715,7 @@ export class SSU2Transport extends EventEmitter {
     const ct = Buffer.from(Crypto.encryptChaCha20Poly1305(s.sendKey!, nonce, plain));
 
     const buf = Buffer.alloc(1 + 8 + 8 + 12 + ct.length);
-    buf.writeUInt8(SSU2MessageType.Nack, 0);
-    buf.writeBigUInt64BE(s.connIdLocal, 1);
-    buf.writeBigUInt64BE(s.connIdRemote, 9);
+    writeSsu2Header(buf, SSU2MessageType.Nack, s.connIdRemote, s.connIdLocal);
     nonce.copy(buf, 17);
     ct.copy(buf, 29);
     return buf;
