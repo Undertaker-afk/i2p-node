@@ -1,4 +1,5 @@
 # I2P Router — TypeScript Implementation
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Undertaker-afk/i2p-node)
 
 A work-in-progress I2P router written in TypeScript/Node.js, designed to interoperate with the production I2P network (i2pd, Java I2P). The project is structured around a checkpoint-based development plan progressing toward an MVP: start router → build tunnels → resolve a .b32.i2p destination → stream-connect → HTTP GET an eepsite.
 
