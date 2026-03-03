@@ -116,7 +116,7 @@ i2p-node/
 │   ├── router.ts           # Main router orchestration
 │   └── index.ts            # Entry point
 ├── docs/                   # Peer discovery fix notes, test summaries
-├── examples/               # Top-level example + smoke test source files
+├── examples/               # Top-level examples + smoke test source files
 ├── TODO.md                 # Checkpoint-organized progress tracker
 ├── package.json
 └── tsconfig.json
