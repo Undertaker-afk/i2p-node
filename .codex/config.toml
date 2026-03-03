@@ -1,2 +1,3 @@
 [mcp_servers.deepwiki]
+transport = "streamable_http"
 server_url = "https://mcp.deepwiki.com/mcp"

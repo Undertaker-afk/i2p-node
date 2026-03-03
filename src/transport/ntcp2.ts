@@ -811,6 +811,7 @@ export class NTCP2Transport extends EventEmitter {
 
     const plain = decryptDataFrame(dp, frame);
     const blocks = decodeBlocks(plain);
+    let receivedTermination = false;
     for (const b of blocks) {
       if (b.type === 4 && b.data.length >= 9) {
         // Termination block: 8 bytes sequence number + 1 byte reason
@@ -825,11 +826,16 @@ export class NTCP2Transport extends EventEmitter {
         const reasonStr = REASONS[reason] ?? `Unknown(${reason})`;
         if (DEBUG) console.log(`NTCP2 received Termination [${sessionId}] reason=${reason} (${reasonStr})`);
         logger.warn('NTCP2 termination received', { sessionId, reason, reasonStr }, 'NTCP2');
+        receivedTermination = true;
       }
       if (DEBUG && b.type !== 3 && b.type !== 254) {
         console.log(`NTCP2 data block [${sessionId}] type=${b.type} len=${b.data.length}`);
       }
       if (b.type === 3) this.emit('message', { sessionId, data: b.data });
+    }
+    if (receivedTermination) {
+      session.socket.destroy();
+      return false;
     }
     return session.recvBuffer.length >= 2;
   }

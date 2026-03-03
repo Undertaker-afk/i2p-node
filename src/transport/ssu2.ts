@@ -53,6 +53,14 @@ export interface SSU2Options {
   netId?: number;
 }
 
+function normalizeHost(host?: string): string | undefined {
+  if (!host) return undefined;
+  if (host.startsWith('[') && host.endsWith(']')) {
+    return host.slice(1, -1).toLowerCase();
+  }
+  return host.toLowerCase();
+}
+
 type SessionState = 'init' | 'request_sent' | 'created_sent' | 'established';
 
 interface HandshakeState {
@@ -238,7 +246,7 @@ export class SSU2Transport extends EventEmitter {
     const eph = Crypto.generateEphemeralKeyPair();
     hs.ePriv = eph.privateKey;
     hs.ePub = eph.publicKey;
-    hs.rs = extractRemoteSsu2StaticKey(remoteRouterInfo);
+    hs.rs = extractRemoteSsu2StaticKey(remoteRouterInfo, host, port);
     logSsu2Keys('connect-init', {
       localStaticPriv: this.options.staticPrivateKey,
       localStaticPub: this.options.staticPublicKey,
@@ -836,9 +844,24 @@ function deriveDirectionalKeys(sharedKey: Uint8Array, isInitiator: boolean): { s
   return { sendKey: responderToInitiator, recvKey: initiatorToResponder };
 }
 
-function extractRemoteSsu2StaticKey(ri: RouterInfo): Uint8Array {
-  const addr = ri.addresses.find((a) => a.transportStyle === 'SSU2' && a.options.s);
-  if (!addr) throw new Error('remote RouterInfo has no SSU2 address with s');
+function extractRemoteSsu2StaticKey(ri: RouterInfo, hostHint?: string, portHint?: number): Uint8Array {
+  const addrs = ri.addresses.filter((a) => a.transportStyle === 'SSU2' && a.options.s);
+  if (!addrs.length) throw new Error('remote RouterInfo has no SSU2 address with s');
+
+  let addr = addrs[0];
+  if (hostHint && typeof portHint === 'number') {
+    const normalizedHint = normalizeHost(hostHint);
+    const expectedPort = String(portHint);
+    const exact = addrs.find((a) => {
+      const addressHost = normalizeHost(a.options.host);
+      const addressPort = a.options.port != null ? String(a.options.port) : undefined;
+      return addressPort === expectedPort && addressHost === normalizedHint;
+    });
+    if (exact) {
+      addr = exact;
+    }
+  }
+
   const s = i2pBase64Decode(addr.options.s);
   if (s.length !== 32) throw new Error('remote SSU2 static key must be 32 bytes');
   return new Uint8Array(s);
