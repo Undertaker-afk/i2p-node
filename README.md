@@ -86,6 +86,12 @@ node dist/index.js
 
 # Run the NTCP2 connection test (connects to 30 random peers)
 node test-ntcp2-connect.mjs
+
+# The following examples require the project to be built first (see Building section).
+
+# Run TypeScript smoke tests from the top-level examples folder
+npx ts-node --esm examples/ntcp2-handshake-local-smoke.ts
+npx ts-node --esm examples/ssu2-handshake-local-smoke.ts
 ```
 
 ## Project Structure
@@ -109,11 +115,20 @@ i2p-node/
 │   ├── router.ts           # Main router orchestration
 │   └── index.ts            # Entry point
 ├── docs/                   # Peer discovery fix notes, test summaries
-├── examples/               # Test scripts
+├── examples/               # Top-level examples + smoke test source files
 ├── TODO.md                 # Checkpoint-organized progress tracker
 ├── package.json
 └── tsconfig.json
 ```
+
+
+
+### Example & Test File Layout
+
+- `examples/` now contains the source test/smoke scripts (including the moved TypeScript handshake and stream tests).
+- `src/examples/` is reserved for non-test router usage examples that are built with the TypeScript project.
+- Moved TypeScript tests in `examples/` import router runtime modules from `dist/` so they can run without changing `tsconfig` include/rootDir.
+- Compiled artifacts in `dist/` are intentionally excluded from this source-test layout.
 
 ## Protocols
 
