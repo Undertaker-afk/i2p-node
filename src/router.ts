@@ -69,6 +69,8 @@ export class I2PRouter extends EventEmitter {
   private identityEx: IdentityExBuildResult | null = null;
   private wireRouterInfo: Buffer | null = null;
   private ntcp2PublishedIV: Buffer | null = null;
+  /** SSU2 introduction key (32 bytes), published in the RI address option 'i'. */
+  private ssu2IntroKey: Buffer | null = null;
 
   constructor(options: I2PRouterOptions = {}) {
     super();
@@ -356,6 +358,11 @@ export class I2PRouter extends EventEmitter {
     const publishedIV = Buffer.from(Crypto.randomBytes(16));
     this.ntcp2PublishedIV = publishedIV;
 
+    // Generate SSU2 introduction key (random 32 bytes, published in RI)
+    const ssu2IntroKey = Buffer.from(Crypto.randomBytes(32));
+    this.ssu2IntroKey = ssu2IntroKey;
+    const ssu2StaticKey = Buffer.from(this.identity!.identity.encryptionPublicKey);
+
     // For outbound-only (unpublished) routers, the NTCP2 address in the RI
     // must contain ONLY s, v, and caps -- NO host, port, or i.
     // If i is present, i2pd treats the address as "published" and checks
@@ -390,6 +397,23 @@ export class I2PRouter extends EventEmitter {
         cost: isPublished ? 3 : 14,
         dateMs: 0, // no expiration
         options: ntcp2Opts
+      },
+      {
+        transportStyle: 'SSU2',
+        cost: isPublished ? 4 : 15,
+        dateMs: 0,
+        options: isPublished ? {
+          host,
+          port: ssu2Port.toString(),
+          s: i2pBase64Encode(ssu2StaticKey),
+          i: i2pBase64Encode(ssu2IntroKey),
+          v: '2',
+          caps: 'LR',
+        } : {
+          s: i2pBase64Encode(ssu2StaticKey),
+          i: i2pBase64Encode(ssu2IntroKey),
+          v: '2',
+        }
       }
     ];
 
@@ -454,6 +478,8 @@ export class I2PRouter extends EventEmitter {
       port: this.options.ssu2Port,
       staticPrivateKey: Buffer.from(this.identity!.encryptionPrivateKey),
       staticPublicKey: Buffer.from(this.identity!.identity.encryptionPublicKey),
+      introKey: this.ssu2IntroKey ?? undefined,
+      routerInfo: this.wireRouterInfo ?? undefined,
       netId: this.options.netId
     });
 
