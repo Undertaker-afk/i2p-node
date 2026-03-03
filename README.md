@@ -87,8 +87,7 @@ node dist/index.js
 # Run the NTCP2 connection test (connects to 30 random peers)
 node test-ntcp2-connect.mjs
 
-# Build first (examples import runtime modules from dist/)
-npx tsc
+# The following examples require the project to be built first (see Building section).
 
 # Run TypeScript smoke tests from the top-level examples folder
 npx ts-node --esm examples/ntcp2-handshake-local-smoke.ts
