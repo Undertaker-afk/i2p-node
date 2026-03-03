@@ -182,6 +182,38 @@ export class I2NPMessages {
       payload
     };
   }
+
+  static createGarlic(
+    cloves: { deliveryInstructions: Buffer; message: Buffer }[]
+  ): I2NPMessage {
+    // Garlic payload: cloveCount(1), then for each clove: cloveId(4), expiration(8), size(2), data
+    const cloveCount = Buffer.alloc(1);
+    cloveCount.writeUInt8(cloves.length);
+
+    const cloveBuffers: Buffer[] = [cloveCount];
+    for (const clove of cloves) {
+      const cloveId = Buffer.alloc(4);
+      cloveId.writeUInt32BE(Math.floor(Math.random() * 0xFFFFFFFF));
+
+      const expiration = Buffer.alloc(8);
+      expiration.writeBigUInt64BE(BigInt(Date.now() + 60000));
+
+      const data = Buffer.concat([clove.deliveryInstructions, clove.message]);
+      const size = Buffer.alloc(2);
+      size.writeUInt16BE(data.length);
+
+      cloveBuffers.push(cloveId, expiration, size, data);
+    }
+
+    const payload = Buffer.concat(cloveBuffers);
+
+    return {
+      type: I2NPMessageType.GARLIC,
+      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      expiration: Date.now() + 60000,
+      payload
+    };
+  }
 }
 
 export default I2NPMessages;

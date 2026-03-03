@@ -712,6 +712,12 @@ export class I2PRouter extends EventEmitter {
       }
     }
 
+    // Update uptime
+    const uptimeMinutes = Math.floor((Date.now() - this.stats.startTime) / 60000);
+    if (this.routerInfo) {
+      this.routerInfo.options['stat_uptime'] = `${uptimeMinutes}m`;
+    }
+
     this.publishRouterInfo();
     this.updateStats();
     this.emit('maintenance', { stats: this.getStats() });
@@ -776,9 +782,63 @@ export class I2PRouter extends EventEmitter {
   }
 
   private publishRouterInfo(): void {
-    if (!this.routerInfo) return;
+    if (!this.routerInfo || !this.identityEx || !this.wireRouterInfo) return;
     
     this.routerInfo.published = Date.now();
+    
+    // Recreate wire RouterInfo with updated published timestamp
+    const publishedIV = this.ntcp2PublishedIV || Buffer.from(Crypto.randomBytes(16));
+    const host = this.options.host || '0.0.0.0';
+    const ntcp2Port = this.options.ntcp2Port || 12345;
+    const caps = this.buildCaps();
+    const netId = this.options.netId || 2;
+
+    const isPublished = host !== '0.0.0.0' && host !== '::' && ntcp2Port > 0;
+
+    let ntcp2Opts: Record<string, string>;
+    if (isPublished) {
+      ntcp2Opts = makeNtcp2PublishedOptions({
+        host,
+        port: ntcp2Port,
+        staticKey: this.identity!.identity.encryptionPublicKey,
+        ivB64: i2pBase64Encode(publishedIV),
+        v: '2',
+        caps
+      });
+    } else {
+      ntcp2Opts = {
+        s: i2pBase64Encode(Buffer.from(this.identity!.identity.encryptionPublicKey)),
+        v: '2',
+      };
+      const capStr = caps.includes('4') || !caps.includes('6') ? '4' : '6';
+      ntcp2Opts.caps = capStr;
+    }
+
+    const addressesWire = [
+      {
+        transportStyle: 'NTCP2',
+        cost: isPublished ? 3 : 14,
+        dateMs: 0,
+        options: ntcp2Opts
+      }
+    ];
+
+    this.wireRouterInfo = writeRouterInfoEd25519({
+      identityBytes: this.identityEx.identityBytes,
+      publishedMs: this.routerInfo.published,
+      addresses: addressesWire,
+      routerProperties: {
+        netId: netId.toString(),
+        caps,
+        'router.version': '0.9.66',
+        'core.version': '0.9.66',
+        'stat_uptime': this.routerInfo.options['stat_uptime'] || '0m'
+      },
+      signingPrivateKey: this.identity!.signingPrivateKey
+    });
+
+    // Update NetDb with the updated RouterInfo
+    this.netDb.storeRouterInfo(this.routerInfo);
     
     const floodfills = this.netDb.findClosestFloodfills(
       this.routerInfo.getRouterHash(),
@@ -786,7 +846,58 @@ export class I2PRouter extends EventEmitter {
     );
     
     for (const floodfill of floodfills) {
-      this.emit('publishRouterInfo', { floodfill });
+      this.sendDatabaseStoreTo(floodfill, this.wireRouterInfo);
+    }
+  }
+
+  private async sendDatabaseStoreTo(routerInfo: RouterInfo, data: Buffer): Promise<void> {
+    const ntcp2Addr = routerInfo.addresses.find(a => a.transportStyle === 'NTCP2');
+    const ssu2Addr = routerInfo.addresses.find(a => a.transportStyle === 'SSU2');
+
+    const dbStore = I2NPMessages.createDatabaseStore(
+      routerInfo.getRouterHash(),
+      data,
+      0, // replyToken
+      this.routerInfo!.getRouterHash(),
+      'routerInfo'
+    );
+
+    const serialized = I2NPMessages.serializeMessage(dbStore);
+
+    // Try NTCP2 first
+    if (ntcp2Addr) {
+      const host = ntcp2Addr.options.host;
+      const port = parseInt(ntcp2Addr.options.port || '0');
+      if (host && port > 0) {
+        const sessionId = `${host}:${port}`;
+        if (this.ntcp2!.hasSession(host, port)) {
+          this.ntcp2!.send(sessionId, serialized);
+          return;
+        } else {
+          try {
+            await this.ntcp2!.connect(host, port, routerInfo);
+            this.ntcp2!.send(sessionId, serialized);
+            return;
+          } catch (err) {
+            // Fall through to SSU2
+          }
+        }
+      }
+    }
+
+    // Fallback to SSU2
+    if (ssu2Addr && this.ssu2) {
+      const host = ssu2Addr.options.host;
+      const port = parseInt(ssu2Addr.options.port || '0');
+      if (host && port > 0) {
+        const sessionId = `${host}:${port}`;
+        try {
+          await this.ssu2.connect(host, port, routerInfo);
+          this.ssu2.send(sessionId, serialized);
+        } catch (err) {
+          // Ignore
+        }
+      }
     }
   }
 

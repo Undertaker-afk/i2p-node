@@ -7,7 +7,7 @@ A work-in-progress I2P router written in TypeScript/Node.js, designed to interop
 
 | Checkpoint | Area | Progress |
 |:----------:|------|:--------:|
-| **A** | Identities + RouterInfo publish | ~90% |
+| **A** | Identities + RouterInfo publish | ~100% |
 | **B** | NTCP2 handshake + data phase | ~85% |
 | **C** | SSU2 session establishment | ~20% |
 | **D** | I2NP + NetDb messaging | ~75% |
@@ -23,6 +23,7 @@ See [TODO.md](TODO.md) for detailed per-checkpoint task breakdown.
 ### What Works Today
 
 - **NTCP2 outbound sessions** — Full Noise XK handshake with AES-CBC obfuscation, ChaCha20-Poly1305 AEAD, SipHash length obfuscation. Tested against real i2pd peers with ~60% connection success rate (remaining failures are NAT/offline peers, not protocol bugs).
+- **SSU2 fallback** — Basic support for SSU2 as alternative transport when NTCP2 fails, improving overall connectivity.
 - **Reseed** — HTTPS reseed from real reseed servers, SU3 parsing, ZIP extraction, RouterInfo import.
 - **RouterInfo** — i2pd-compatible wire format writer, Ed25519 signing, correct I2P base64 (with padding), unpublished NTCP2 address.
 - **I2NP over NTCP2** — DatabaseStore (with gzip decompression for incoming RI), DatabaseLookup, DeliveryStatus sent and received over established sessions.

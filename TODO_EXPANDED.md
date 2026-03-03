@@ -9,20 +9,20 @@ This document provides a detailed technical breakdown of the remaining tasks req
 
 ---
 
-## 🏗 Checkpoint A: Identities & RouterInfo (95%)
+## 🏗 Checkpoint A: Identities & RouterInfo (100%)
 *Focus: Identity generation and RouterInfo interoperability.*
 
 - [x] **IdentityEx Support**: Implement the 387+4 byte layout with `CERTIFICATE_TYPE_KEY=5`.
 - [x] **Ed25519 Signing**: Integration with `@noble/curves`.
 - [x] **RouterInfo Writer**: Serialization compatible with i2pd/Java-I2P.
 - [x] **I2P Base64**: Custom padding requirements for network interop.
-- [ ] **Published RouterInfo Maintenance**:
-    - [ ] Implement `isPublished` heuristic based on reachable IP/Port.
-    - [ ] Auto-update `stat_uptime` and `published` timestamp.
-    - [ ] Sign and re-serialize when addresses or properties change.
-- [ ] **NetDb Publication**:
-    - [ ] Wrap `DatabaseStore` in `GarlicMessage` for secure publication.
-    - [ ] Implement floodfill selection based on XOR distance to router hash.
+- [x] **Published RouterInfo Maintenance**:
+    - [x] Implement `isPublished` heuristic based on reachable IP/Port.
+    - [x] Auto-update `stat_uptime` and `published` timestamp.
+    - [x] Sign and re-serialize when addresses or properties change.
+- [x] **NetDb Publication**:
+    - [x] Wrap `DatabaseStore` in `GarlicMessage` for secure publication.
+    - [x] Implement floodfill selection based on XOR distance to router hash.
 
 ---
 
@@ -40,6 +40,7 @@ This document provides a detailed technical breakdown of the remaining tasks req
 - [ ] **Termination Codes**:
     - [ ] Gracefully handle all 18+ termination reason codes.
     - [ ] Implement local termination on timeout or protocol error.
+- [ ] **SSU2 Fallback**: Use SSU2 transport as fallback when NTCP2 connections fail, to improve connectivity and LeaseSet retrieval.
 
 ---
 
