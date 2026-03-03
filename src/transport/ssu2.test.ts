@@ -29,30 +29,34 @@ async function buildRouterInfo(host: string, port: number, staticKey: Uint8Array
 test('ssu2 local handshake and reliable data flow', { timeout: 15000 }, async () => {
   const bobStatic = Crypto.generateKeyPair();
   const bob = new SSU2Transport({ host: '127.0.0.1', port: 0, staticPrivateKey: bobStatic.privateKey, staticPublicKey: bobStatic.publicKey, netId: 2 });
-  await bob.start();
-  const bobAddress = (bob as any).socket.address();
-  const bobPort = bobAddress.port as number;
-  const bobRi = await buildRouterInfo('127.0.0.1', bobPort, bobStatic.publicKey);
-
   const aliceStatic = Crypto.generateKeyPair();
   const alice = new SSU2Transport({ host: '127.0.0.1', port: 0, staticPrivateKey: aliceStatic.privateKey, staticPublicKey: aliceStatic.publicKey, netId: 2 });
-  await alice.start();
 
-  const sid = `127.0.0.1:${bobPort}`;
-  const received = new Promise<Buffer>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('timeout waiting for data')), 8000);
-    bob.on('message', ({ data }) => {
-      clearTimeout(timer);
-      resolve(data as Buffer);
+  try {
+    await bob.start();
+    const bobAddress = bob.getListeningAddress();
+    if (!bobAddress) throw new Error('bob not listening');
+    const bobPort = bobAddress.port;
+    const bobRi = await buildRouterInfo('127.0.0.1', bobPort, bobStatic.publicKey);
+
+    await alice.start();
+
+    const sid = `127.0.0.1:${bobPort}`;
+    const received = new Promise<Buffer>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout waiting for data')), 8000);
+      bob.on('message', ({ data }) => {
+        clearTimeout(timer);
+        resolve(data as Buffer);
+      });
     });
-  });
 
-  await alice.connect('127.0.0.1', bobPort, bobRi);
-  alice.send(sid, Buffer.from('hello-ssu2'));
+    await alice.connect('127.0.0.1', bobPort, bobRi);
+    alice.send(sid, Buffer.from('hello-ssu2'));
 
-  const data = await received;
-  assert.equal(data.toString('utf8'), 'hello-ssu2');
-
-  alice.stop();
-  bob.stop();
+    const data = await received;
+    assert.equal(data.toString('utf8'), 'hello-ssu2');
+  } finally {
+    alice.stop();
+    bob.stop();
+  }
 });
