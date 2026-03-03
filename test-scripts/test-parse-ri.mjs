@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
-const { parseI2PRouterInfo } = await import('./dist/data/router-info-i2p.js');
-const { i2pBase64Decode } = await import('./dist/i2p/base64.js');
+const { parseI2PRouterInfo } = await import('../dist/data/router-info-i2p.js');
+const { i2pBase64Decode } = await import('../dist/i2p/base64.js');
 
 const netDbDir = 'c:/Users/floga/Desktop/coding/fun/i2p-node/i2p-test-data/netDb';
 const files = readdirSync(netDbDir).filter(f => f.endsWith('.dat')).slice(0, 5);

@@ -2,7 +2,7 @@
 /**
  * Test RI signature with both @noble/curves AND Node.js crypto (OpenSSL).
  */
-import { I2PRouter, logger, LogLevel } from './dist/index.js';
+import { I2PRouter, logger, LogLevel } from '../dist/index.js';
 import { ed25519 } from '@noble/curves/ed25519';
 import { createPublicKey, verify as cryptoVerify, createPrivateKey, sign as cryptoSign } from 'crypto';
 

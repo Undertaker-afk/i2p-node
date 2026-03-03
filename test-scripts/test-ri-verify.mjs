@@ -3,7 +3,7 @@
  * Test that our RouterInfo signature verifies correctly.
  * This mimics what i2pd does when it receives our SessionConfirmed.
  */
-import { I2PRouter, logger, LogLevel } from './dist/index.js';
+import { I2PRouter, logger, LogLevel } from '../dist/index.js';
 import { ed25519 } from '@noble/curves/ed25519';
 
 logger.setLevel(LogLevel.WARN);

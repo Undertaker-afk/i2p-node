@@ -10,9 +10,9 @@
  */
 
 import { execSync } from 'child_process';
-import { I2PRouter, logger, LogLevel } from './dist/index.js';
-import { base32DecodeToHash } from './dist/i2p/base32.js';
-import { I2NPMessages } from './dist/i2np/messages.js';
+import { I2PRouter, logger, LogLevel } from '../dist/index.js';
+import { base32DecodeToHash } from '../dist/i2p/base32.js';
+import { I2NPMessages } from '../dist/i2np/messages.js';
 
 // ── Config ──────────────────────────────────────────────────────────────
 

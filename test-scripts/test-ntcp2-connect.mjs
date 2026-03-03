@@ -6,7 +6,7 @@
  *
  * Usage:  NTCP2_DEBUG=1 node test-ntcp2-connect.mjs
  */
-import { I2PRouter, logger, LogLevel } from './dist/index.js';
+import { I2PRouter, logger, LogLevel } from '../dist/index.js';
 
 // Force NTCP2_DEBUG so we see hex dumps
 process.env.NTCP2_DEBUG = '1';

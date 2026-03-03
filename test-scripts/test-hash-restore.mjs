@@ -6,10 +6,10 @@ import { readFileSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
 
-const { RouterInfo, RouterIdentity } = await import('./dist/data/router-info.js');
-const { NetworkDatabase } = await import('./dist/netdb/index.js');
-const { buildIdentityExEd25519X25519 } = await import('./dist/i2p/identity/identity-ex.js');
-const { Crypto } = await import('./dist/crypto/index.js');
+const { RouterInfo, RouterIdentity } = await import('../dist/data/router-info.js');
+const { NetworkDatabase } = await import('../dist/netdb/index.js');
+const { buildIdentityExEd25519X25519 } = await import('../dist/i2p/identity/identity-ex.js');
+const { Crypto } = await import('../dist/crypto/index.js');
 const { ed25519 } = await import('@noble/curves/ed25519');
 
 // ── Build a fake router with known identity ─────────────────────────────────
