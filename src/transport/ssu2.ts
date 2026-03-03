@@ -29,6 +29,21 @@ const MAX_SERVER_TOKENS = 2048;
 const SESSION_IDLE_MS = 30_000;
 const ESTABLISHED_IDLE_MS = 10 * 60_000;
 const CLEANUP_INTERVAL_MS = 10_000;
+const KEY_DEBUG = process.env.TRANSPORT_KEY_DEBUG === '1' || process.env.SSU2_KEY_DEBUG === '1';
+
+function hex(value?: Uint8Array | Buffer | null): string {
+  if (!value) return '';
+  return Buffer.from(value).toString('hex');
+}
+
+function logSsu2Keys(stage: string, data: Record<string, Uint8Array | Buffer | null | undefined>): void {
+  if (!KEY_DEBUG) return;
+  const payload: Record<string, string> = {};
+  for (const [key, value] of Object.entries(data)) {
+    payload[key] = hex(value as Uint8Array | Buffer | null | undefined);
+  }
+  logger.info(`SSU2 key dump: ${stage}`, payload, 'SSU2');
+}
 
 export interface SSU2Options {
   host?: string;
@@ -76,6 +91,67 @@ export interface SSU2Session {
   receivedPackets: Set<number>;
   createdAt: number;
   lastActivity: number;
+}
+
+function dumpSsu2HandshakeState(hs: HandshakeState): Record<string, string | number | null | undefined> {
+  return {
+    k: hex(hs.k),
+    h: hex(hs.h),
+    ePriv: hex(hs.ePriv),
+    ePub: hex(hs.ePub),
+    rs: hex(hs.rs),
+    timeoutAt: hs.timeoutAt
+  };
+}
+
+function dumpSentPacket(packet?: SentPacket): Record<string, string | number | undefined> {
+  if (!packet) return {};
+  return {
+    raw: hex(packet.raw),
+    retransmits: packet.retransmits,
+    createdAt: packet.createdAt,
+    rawLen: packet.raw.length
+  };
+}
+
+function logSsu2InterfaceSnapshot(stage: string, sessionId: string, s: SSU2Session): void {
+  if (!KEY_DEBUG) return;
+  const pendingPreview = Array.from(s.pendingData.entries())
+    .slice(0, 8)
+    .map(([packetNumber, packet]) => ({
+      packetNumber,
+      ...dumpSentPacket(packet)
+    }));
+
+  logger.info(
+    `SSU2 interface snapshot: ${stage}`,
+    {
+      sessionId,
+      address: s.address,
+      port: s.port,
+      state: s.state,
+      isInitiator: s.isInitiator,
+      connIdLocal: s.connIdLocal.toString(),
+      connIdRemote: s.connIdRemote.toString(),
+      handshake: dumpSsu2HandshakeState(s.hs),
+      sendKey: hex(s.sendKey),
+      recvKey: hex(s.recvKey),
+      sendNonce: s.sendNonce,
+      recvNonce: s.recvNonce,
+      sendEpoch: s.sendEpoch,
+      recvEpoch: s.recvEpoch,
+      token: s.token?.toString(),
+      handshakeRetries: s.handshakeRetries,
+      hasHandshakeTimer: !!s.handshakeTimer,
+      pendingDataSize: s.pendingData.size,
+      pendingDataPreview: pendingPreview,
+      receivedPacketsSize: s.receivedPackets.size,
+      receivedPacketsPreview: Array.from(s.receivedPackets).slice(0, 16),
+      createdAt: s.createdAt,
+      lastActivity: s.lastActivity
+    },
+    'SSU2'
+  );
 }
 
 export class SSU2Transport extends EventEmitter {
@@ -139,7 +215,7 @@ export class SSU2Transport extends EventEmitter {
     return `${address}:${port}`;
   }
 
-  async connect(host: string, port: number, remoteRouterInfo: RouterInfo): Promise<void> {
+  async connect(host: string, port: number, remoteRouterInfo: RouterInfo, timeoutMsOverride?: number): Promise<void> {
     if (!this.options.staticPrivateKey || !this.options.staticPublicKey) {
       throw new Error('SSU2 static keys not configured');
     }
@@ -157,7 +233,15 @@ export class SSU2Transport extends EventEmitter {
     hs.ePriv = eph.privateKey;
     hs.ePub = eph.publicKey;
     hs.rs = extractRemoteSsu2StaticKey(remoteRouterInfo);
-    hs.timeoutAt = Date.now() + HANDSHAKE_TIMEOUT_MS;
+    logSsu2Keys('connect-init', {
+      localStaticPriv: this.options.staticPrivateKey,
+      localStaticPub: this.options.staticPublicKey,
+      remoteStaticPub: hs.rs,
+      ePriv: hs.ePriv,
+      ePub: hs.ePub
+    });
+    const handshakeTimeoutMs = Math.max(3000, timeoutMsOverride ?? HANDSHAKE_TIMEOUT_MS);
+    hs.timeoutAt = Date.now() + handshakeTimeoutMs;
 
     const session: SSU2Session = {
       address: host,
@@ -180,6 +264,7 @@ export class SSU2Transport extends EventEmitter {
     };
 
     this.sessions.set(id, session);
+    logSsu2InterfaceSnapshot('connect-created', id, session);
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -219,7 +304,7 @@ export class SSU2Transport extends EventEmitter {
       const timeout = setTimeout(() => {
         logger.warn('SSU2 connect timeout', { host, port, sessionId: id }, 'SSU2');
         fail(new Error('SSU2 connect timeout'));
-      }, HANDSHAKE_TIMEOUT_MS + 1000);
+      }, handshakeTimeoutMs + 1000);
 
       this.on('established', onEstablished);
 
@@ -246,6 +331,7 @@ export class SSU2Transport extends EventEmitter {
     }
     const pkt = this.buildData(s, data);
     s.pendingData.set(packetNumber, { raw: pkt, retransmits: 0, createdAt: Date.now() });
+    logSsu2InterfaceSnapshot('data-send-enqueue', sessionId, s);
     this.socket.send(pkt, s.port, s.address);
     setTimeout(() => this.retransmitIfUnacked(sessionId, packetNumber), DATA_RETRANSMIT_MS);
   }
@@ -266,6 +352,7 @@ export class SSU2Transport extends EventEmitter {
 
     pending.retransmits++;
     this.touchSession(s);
+    logSsu2InterfaceSnapshot('data-retransmit', sessionId, s);
     this.socket.send(pending.raw, s.port, s.address);
     setTimeout(() => this.retransmitIfUnacked(sessionId, packetNumber), DATA_RETRANSMIT_MS * 2);
   }
@@ -332,6 +419,7 @@ export class SSU2Transport extends EventEmitter {
         lastActivity: Date.now()
       };
       this.sessions.set(id, s);
+      logSsu2InterfaceSnapshot('incoming-session-created', id, s);
     }
 
     const s = this.sessions.get(id)!;
@@ -353,6 +441,15 @@ export class SSU2Transport extends EventEmitter {
     const { ck, k } = mixKey(hs.h, dh);
     hs.h = ck;
     hs.k = k;
+    logSsu2Keys('session-request', {
+      ePriv: hs.ePriv,
+      ePub: hs.ePub,
+      remoteStaticPub: hs.rs,
+      dh,
+      ck,
+      k,
+      h: hs.h
+    });
 
     const plain = Buffer.alloc(2);
     plain.writeUInt8(this.options.netId & 0xff, 0);
@@ -398,6 +495,15 @@ export class SSU2Transport extends EventEmitter {
     const { ck, k } = mixKey(hs.h, dh);
     hs.h = ck;
     hs.k = k;
+    logSsu2Keys('session-request-recv', {
+      localStaticPriv: this.options.staticPrivateKey,
+      localStaticPub: this.options.staticPublicKey,
+      remoteEpub: eph,
+      dh,
+      ck,
+      k,
+      h: hs.h
+    });
 
     const nonce = Buffer.alloc(12);
     let plain: Buffer;
@@ -412,6 +518,7 @@ export class SSU2Transport extends EventEmitter {
     s.state = 'created_sent';
     s.connIdRemote = msg.readBigUInt64BE(1);
     s.connIdLocal = msg.readBigUInt64BE(9);
+    logSsu2InterfaceSnapshot('session-request-accepted', this.sessionKey(s.address, s.port), s);
 
     const reply = this.buildSessionCreated(s);
     this.sendFireAndForget(reply, s.address, s.port, 'SessionCreated');
@@ -442,6 +549,11 @@ export class SSU2Transport extends EventEmitter {
     const { sendKey, recvKey } = deriveDirectionalKeys(hs.k!, false);
     s.sendKey = sendKey;
     s.recvKey = recvKey;
+    logSsu2Keys('session-created-send-keys', {
+      k: hs.k,
+      sendKey: s.sendKey,
+      recvKey: s.recvKey
+    });
 
     const plain = Buffer.from('CREATED');
     const nonce = Buffer.alloc(12);
@@ -471,10 +583,16 @@ export class SSU2Transport extends EventEmitter {
     const { sendKey, recvKey } = deriveDirectionalKeys(hs.k!, true);
     s.sendKey = sendKey;
     s.recvKey = recvKey;
+    logSsu2Keys('session-created-recv-keys', {
+      k: hs.k,
+      sendKey: s.sendKey,
+      recvKey: s.recvKey
+    });
 
     const confirmed = this.buildSessionConfirmed(s);
     this.sendFireAndForget(confirmed, s.address, s.port, 'SessionConfirmed');
     s.state = 'established';
+    logSsu2InterfaceSnapshot('initiator-established', this.sessionKey(s.address, s.port), s);
     logger.info('SSU2 session established (initiator)', { sessionId: this.sessionKey(s.address, s.port) }, 'SSU2');
     this.emit('established', { sessionId: this.sessionKey(s.address, s.port) });
   }
@@ -504,6 +622,11 @@ export class SSU2Transport extends EventEmitter {
     if (plain.toString('utf8') !== 'CONFIRMED') return;
 
     s.state = 'established';
+    logSsu2InterfaceSnapshot('responder-established', this.sessionKey(s.address, s.port), s);
+    logSsu2Keys('session-confirmed-established', {
+      sendKey: s.sendKey,
+      recvKey: s.recvKey
+    });
     logger.info('SSU2 session established (responder)', { sessionId: this.sessionKey(s.address, s.port) }, 'SSU2');
     this.emit('established', { sessionId: this.sessionKey(s.address, s.port) });
   }

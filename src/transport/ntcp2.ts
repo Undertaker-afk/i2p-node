@@ -9,6 +9,81 @@ import { ed25519 } from '@noble/curves/ed25519';
 type SessionState = 'init' | 'm1_sent' | 'm2_sent' | 'm2_recv' | 'm3_sent' | 'm3_recv' | 'established';
 
 const DEBUG = process.env.NTCP2_DEBUG === '1';
+const KEY_DEBUG = process.env.TRANSPORT_KEY_DEBUG === '1' || process.env.NTCP2_KEY_DEBUG === '1';
+
+function hex(value?: Uint8Array | Buffer | null): string {
+  if (!value) return '';
+  return Buffer.from(value).toString('hex');
+}
+
+function logNtcp2Keys(stage: string, data: Record<string, Uint8Array | Buffer | null | undefined>): void {
+  if (!KEY_DEBUG) return;
+  const payload: Record<string, string> = {};
+  for (const [key, value] of Object.entries(data)) {
+    payload[key] = hex(value as Uint8Array | Buffer | null | undefined);
+  }
+  logger.info(`NTCP2 key dump: ${stage}`, payload, 'NTCP2');
+}
+
+function dumpNtcp2Handshake(hs?: NTCP2Handshake): Record<string, string | number | boolean | null | undefined> {
+  if (!hs) return { present: false };
+  return {
+    present: true,
+    h: hex(hs.h),
+    ck: hex(hs.ck),
+    k: hex(hs.k),
+    nonce: hs.nonce,
+    ePriv: hex(hs.ePriv),
+    ePub: hex(hs.ePub),
+    rPriv: hex(hs.rPriv),
+    rPub: hex(hs.rPub),
+    rs: hex(hs.rs),
+    remoteStatic: hex(hs.remoteStatic),
+    aesIV2: hex(hs.aesIV2),
+    m3p2Len: hs.m3p2Len
+  };
+}
+
+function dumpNtcp2DataPhase(dp?: NTCP2DataPhase): Record<string, string | number | boolean | null | undefined> {
+  if (!dp) return { present: false };
+  return {
+    present: true,
+    sendKey: hex(dp.sendKey),
+    recvKey: hex(dp.recvKey),
+    sendNonce: dp.sendNonce,
+    recvNonce: dp.recvNonce,
+    sipSendK1: hex(dp.sipSend.k1),
+    sipSendK2: hex(dp.sipSend.k2),
+    sipSendIV: hex(dp.sipSend.iv),
+    sipRecvK1: hex(dp.sipRecv.k1),
+    sipRecvK2: hex(dp.sipRecv.k2),
+    sipRecvIV: hex(dp.sipRecv.iv)
+  };
+}
+
+function logNtcp2InterfaceSnapshot(stage: string, sessionId: string, session: NTCP2Session): void {
+  if (!KEY_DEBUG) return;
+  logger.info(
+    `NTCP2 interface snapshot: ${stage}`,
+    {
+      sessionId,
+      state: session.state,
+      isInitiator: session.isInitiator,
+      recvBufferLen: session.recvBuffer.length,
+      remoteRouterHash: hex(session.remoteRouterHash),
+      remoteNtcp2IV: hex(session.remoteNtcp2IV),
+      remoteNtcp2Static: hex(session.remoteNtcp2Static),
+      socketDestroyed: session.socket.destroyed,
+      socketLocalAddress: session.socket.localAddress,
+      socketLocalPort: session.socket.localPort,
+      socketRemoteAddress: session.socket.remoteAddress,
+      socketRemotePort: session.socket.remotePort,
+      handshake: dumpNtcp2Handshake(session.hs),
+      dataPhase: dumpNtcp2DataPhase(session.dp)
+    },
+    'NTCP2'
+  );
+}
 
 export interface NTCP2Options {
   host?: string;
@@ -160,7 +235,7 @@ export class NTCP2Transport extends EventEmitter {
    * Outbound connect to a reseeded peer. Requires the peer RouterInfo to contain
    * an NTCP2 address with options: host, port, s, i.
    */
-  async connect(host: string, port: number, remoteRouterInfo: RouterInfo): Promise<void> {
+  async connect(host: string, port: number, remoteRouterInfo: RouterInfo, timeoutMsOverride?: number): Promise<void> {
     const { s, i } = this.extractRemoteNtcp2Keys(remoteRouterInfo, host, port);
     const remoteRouterHash = Buffer.from(remoteRouterInfo.getRouterHash());
 
@@ -179,7 +254,7 @@ export class NTCP2Transport extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       const socket = new Socket();
-      const timeoutMs = this.options.connectTimeoutMs ?? 8000;
+      const timeoutMs = timeoutMsOverride ?? this.options.connectTimeoutMs ?? 8000;
       socket.setTimeout(timeoutMs);
       const session: NTCP2Session = {
         socket,
@@ -191,6 +266,7 @@ export class NTCP2Transport extends EventEmitter {
         remoteNtcp2Static: s
       };
       this.sessions.set(sessionId, session);
+      logNtcp2InterfaceSnapshot('connect-created', sessionId, session);
 
       let settled = false;
       const fail = (err: unknown) => {
@@ -310,6 +386,18 @@ export class NTCP2Transport extends EventEmitter {
     hs.ePriv = eph.privateKey;
     hs.ePub = Buffer.from(eph.publicKey);
 
+    logNtcp2Keys('m1-init', {
+      localStaticPriv: this.options.staticPrivateKey,
+      localStaticPub: this.options.staticPublicKey,
+      remoteStaticPub: session.remoteNtcp2Static,
+      remoteRouterHash: session.remoteRouterHash,
+      remotePublishedIV: session.remoteNtcp2IV,
+      ePriv: hs.ePriv,
+      ePub: hs.ePub,
+      h: hs.h,
+      ck: hs.ck
+    });
+
     if (DEBUG) {
       console.log('NTCP2 m1 remoteStaticKey (s)', session.remoteNtcp2Static.toString('hex'));
       console.log('NTCP2 m1 remoteRouterHash (AES key)', session.remoteRouterHash.toString('hex'));
@@ -335,6 +423,12 @@ export class NTCP2Transport extends EventEmitter {
     const dh = Crypto.x25519DiffieHellman(hs.ePriv, session.remoteNtcp2Static);
     if (DEBUG) console.log('NTCP2 m1 DH result', Buffer.from(dh).toString('hex'));
     mixKey(hs, dh);
+    logNtcp2Keys('m1-after-mixkey', {
+      dh,
+      k: hs.k,
+      ck: hs.ck,
+      h: hs.h
+    });
     if (DEBUG) console.log('NTCP2 m1 derived k', hs.k?.toString('hex'));
     if (DEBUG) console.log('NTCP2 m1 derived ck', hs.ck.toString('hex'));
     if (DEBUG) console.log('NTCP2 m1 ad h', hs.h.toString('hex'));
@@ -367,6 +461,7 @@ export class NTCP2Transport extends EventEmitter {
 
     session.hs = hs;
     session.state = 'm1_sent';
+    logNtcp2InterfaceSnapshot('m1-sent', sessionId, session);
     session.socket.write(Buffer.concat([encX, ct1, padding]));
   }
 
@@ -391,6 +486,15 @@ export class NTCP2Transport extends EventEmitter {
 
     const dh = Crypto.x25519DiffieHellman(this.options.staticPrivateKey, hs.ePub);
     mixKey(hs, dh);
+    logNtcp2Keys('m1-recv-after-mixkey', {
+      localStaticPriv: this.options.staticPrivateKey,
+      localStaticPub: this.options.staticPublicKey,
+      remoteEpub: hs.ePub,
+      dh,
+      k: hs.k,
+      ck: hs.ck,
+      h: hs.h
+    });
     if (DEBUG) console.log('NTCP2 m1 recv derived k', hs.k?.toString('hex'));
     if (DEBUG) console.log('NTCP2 m1 recv ad h', hs.h.toString('hex'));
 
@@ -419,6 +523,7 @@ export class NTCP2Transport extends EventEmitter {
     // respond with SessionCreated
     this.sendSessionCreated(sessionId, session);
     session.state = 'm2_sent';
+    logNtcp2InterfaceSnapshot('m2-sent', sessionId, session);
     return true;
   }
 
@@ -432,6 +537,12 @@ export class NTCP2Transport extends EventEmitter {
     const eph = Crypto.generateEphemeralKeyPair();
     hs.rPriv = eph.privateKey;
     hs.rPub = Buffer.from(eph.publicKey);
+    logNtcp2Keys('m2-send-ephemeral', {
+      rPriv: hs.rPriv,
+      rPub: hs.rPub,
+      h: hs.h,
+      ck: hs.ck
+    });
 
     // AES encrypt Y using AES state from message1 (iv2)
     const encY = Crypto.aesEncryptCBC(hs.rPub, this.options.routerHash, hs.aesIV2);
@@ -442,6 +553,12 @@ export class NTCP2Transport extends EventEmitter {
     // MixKey(DH(re, e))
     const dh = Crypto.x25519DiffieHellman(hs.rPriv, hs.ePub);
     mixKey(hs, dh);
+    logNtcp2Keys('m2-send-after-mixkey', {
+      dh,
+      k: hs.k,
+      ck: hs.ck,
+      h: hs.h
+    });
 
     const padLen = Math.floor(Math.random() * 32);
     const opts = Buffer.alloc(16);
@@ -473,6 +590,15 @@ export class NTCP2Transport extends EventEmitter {
 
     const dh = Crypto.x25519DiffieHellman(hs.ePriv, hs.rPub);
     mixKey(hs, dh);
+    logNtcp2Keys('m2-recv-after-mixkey', {
+      ePriv: hs.ePriv,
+      ePub: hs.ePub,
+      rPub: hs.rPub,
+      dh,
+      k: hs.k,
+      ck: hs.ck,
+      h: hs.h
+    });
 
     let optsPlain: Buffer;
     try {
@@ -495,6 +621,7 @@ export class NTCP2Transport extends EventEmitter {
     session.state = 'established';
     // Clear the connect timeout so the socket doesn't fire idle 'timeout' events.
     session.socket.setTimeout(0);
+    logNtcp2InterfaceSnapshot('initiator-established', sessionId, session);
     this.emit('established', { sessionId });
     return true;
   }
@@ -515,6 +642,15 @@ export class NTCP2Transport extends EventEmitter {
     // Message 3 part 2: MixKey(DH(s, re))
     const dh = Crypto.x25519DiffieHellman(this.options.staticPrivateKey, hs.rPub);
     mixKey(hs, dh);
+    logNtcp2Keys('m3-send-after-mixkey', {
+      localStaticPriv: this.options.staticPrivateKey,
+      localStaticPub: this.options.staticPublicKey,
+      remoteRpub: hs.rPub,
+      dh,
+      k: hs.k,
+      ck: hs.ck,
+      h: hs.h
+    });
 
     const ri = this.options.routerInfo;
     if (DEBUG && !(this as any)._riDumped) {
@@ -553,6 +689,16 @@ export class NTCP2Transport extends EventEmitter {
 
     // derive data phase
     session.dp = deriveDataPhase(hs.ck, hs.h, true);
+    logNtcp2Keys('data-phase-send', {
+      sendSipK1: session.dp.sipSend.k1,
+      sendSipK2: session.dp.sipSend.k2,
+      sendSipIV: session.dp.sipSend.iv,
+      recvSipK1: session.dp.sipRecv.k1,
+      recvSipK2: session.dp.sipRecv.k2,
+      recvSipIV: session.dp.sipRecv.iv,
+      sendCipherKey: session.dp.sendKey,
+      recvCipherKey: session.dp.recvKey
+    });
 
     session.socket.write(Buffer.concat([ctS, ct3]));
   }
@@ -584,6 +730,15 @@ export class NTCP2Transport extends EventEmitter {
     // MixKey(DH(e, rs)) for Bob side == DH(rPriv, sPub)
     const dh = Crypto.x25519DiffieHellman(hs.rPriv, hs.remoteStatic);
     mixKey(hs, dh);
+    logNtcp2Keys('m3-recv-after-mixkey', {
+      rPriv: hs.rPriv,
+      rPub: hs.rPub,
+      remoteStatic: hs.remoteStatic,
+      dh,
+      k: hs.k,
+      ck: hs.ck,
+      h: hs.h
+    });
 
     let plain: Buffer;
     try {
@@ -599,9 +754,20 @@ export class NTCP2Transport extends EventEmitter {
     if (!riBlk) throw new Error('missing routerinfo block');
 
     session.dp = deriveDataPhase(hs.ck, hs.h, false);
+    logNtcp2Keys('data-phase-recv', {
+      sendSipK1: session.dp.sipSend.k1,
+      sendSipK2: session.dp.sipSend.k2,
+      sendSipIV: session.dp.sipSend.iv,
+      recvSipK1: session.dp.sipRecv.k1,
+      recvSipK2: session.dp.sipRecv.k2,
+      recvSipIV: session.dp.sipRecv.iv,
+      sendCipherKey: session.dp.sendKey,
+      recvCipherKey: session.dp.recvKey
+    });
     session.state = 'established';
     session.socket.setTimeout(0);
     session.recvBuffer = session.recvBuffer.subarray(need);
+    logNtcp2InterfaceSnapshot('responder-established', sessionId, session);
     this.emit('established', { sessionId });
     return true;
   }

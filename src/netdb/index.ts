@@ -189,7 +189,7 @@ export class NetworkDatabase extends EventEmitter {
     const randomHash = createHash('sha256').update(Math.random().toString()).digest();
     
     // Find closest floodfills
-    const closestFloodfills = this.findClosestFloodfills(randomHash, 2);
+    const closestFloodfills = this.findClosestFloodfills(randomHash, 4);
     
     logger.debug(`Exploring peers near ${randomHash.toString('hex').slice(0, 16)}...`, {
       closestFloodfills: closestFloodfills.length

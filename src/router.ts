@@ -758,7 +758,7 @@ export class I2PRouter extends EventEmitter {
           logger.debug('Invalid NTCP2 address for floodfill', { host, port: ntcpAddr.options.port }, 'Router');
         } else {
           try {
-            await this.ntcp2.connect(host, portNum, floodfill);
+            await this.ntcp2.connect(host, portNum, floodfill, 7000);
             const sessionId = `${host}:${portNum}`;
             this.ntcp2.send(sessionId, wire);
             this.stats.messagesSent++;
@@ -793,7 +793,7 @@ export class I2PRouter extends EventEmitter {
         const portNum = parseInt(ssu2Addr.options.port, 10);
         if (host && portNum && !Number.isNaN(portNum)) {
           try {
-            await this.ssu2.connect(host, portNum, floodfill);
+            await this.ssu2.connect(host, portNum, floodfill, 8000);
             const sessionId = `${host}:${portNum}`;
             this.ssu2.send(sessionId, wire);
             this.stats.messagesSent++;
@@ -918,11 +918,11 @@ export class I2PRouter extends EventEmitter {
     if (ssu2Addr && this.ssu2) {
       const host = ssu2Addr.options.host;
       const port = parseInt(ssu2Addr.options.port || '0');
-      if (host && port > 0) {
+      if (host && port > 0 && !host.includes(':') && !host.startsWith('[')) {
         logger.info('NTCP2 failed, falling back to SSU2', { host, port }, 'Router');
         const sessionId = `${host}:${port}`;
         try {
-          await this.ssu2.connect(host, port, routerInfo);
+          await this.ssu2.connect(host, port, routerInfo, 8000);
           this.ssu2.send(sessionId, serialized);
         } catch (err) {
           logger.warn('SSU2 fallback also failed', { host, port, error: (err as Error).message }, 'Router');
@@ -1028,7 +1028,7 @@ export class I2PRouter extends EventEmitter {
     floodfill: RouterInfo,
     lookupType: 0 | 1 | 2 | 3
   ): Promise<void> {
-    // Prefer IPv4 NTCP2/NTCP with full keys; SSU2 fallback is disabled for now.
+    // Prefer IPv4 NTCP2/NTCP with full keys; use SSU2 fallback if NTCP2 is unavailable/fails.
     if (this.ntcp2) {
       const ntcpAddr = floodfill.addresses.find((a) => {
         const styleOk = a.transportStyle.toUpperCase().startsWith('NTCP');
@@ -1045,7 +1045,7 @@ export class I2PRouter extends EventEmitter {
           const fromHash = this.routerInfo!.getRouterHash();
           const msg = I2NPMessages.createDatabaseLookup(targetHash, fromHash, lookupType, []);
           const wire = I2NPMessages.serializeMessage(msg);
-          await this.ntcp2.connect(host, portNum, floodfill);
+          await this.ntcp2.connect(host, portNum, floodfill, 7000);
           const sessionId = `${host}:${portNum}`;
           this.ntcp2.send(sessionId, wire);
           this.stats.messagesSent++;
@@ -1072,7 +1072,7 @@ export class I2PRouter extends EventEmitter {
           const fromHash = this.routerInfo!.getRouterHash();
           const msg = I2NPMessages.createDatabaseLookup(targetHash, fromHash, lookupType, []);
           const wire = I2NPMessages.serializeMessage(msg);
-          await this.ssu2.connect(host, portNum, floodfill);
+          await this.ssu2.connect(host, portNum, floodfill, 8000);
           const sessionId = `${host}:${portNum}`;
           this.ssu2.send(sessionId, wire);
           this.stats.messagesSent++;
