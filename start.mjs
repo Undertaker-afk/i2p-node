@@ -6,9 +6,18 @@
  */
 
 import { execSync } from 'child_process';
+import { appendFileSync, mkdirSync } from 'fs';
+import { dirname } from 'path';
 import { I2PRouter, logger, LogLevel } from './dist/index.js';
 
 logger.setLevel(LogLevel.DEBUG);
+
+const LOG_FILE = process.env.I2P_LOG_FILE || './i2p-test-data/router-debug.log';
+mkdirSync(dirname(LOG_FILE), { recursive: true });
+logger.addHandler((entry) => {
+  const line = JSON.stringify(entry);
+  appendFileSync(LOG_FILE, `${line}\n`, 'utf8');
+});
 
 const NTCP2_PORT = 12345;
 
