@@ -855,9 +855,7 @@ function extractRemoteSsu2StaticKey(ri: RouterInfo, hostHint?: string, portHint?
     const exact = addrs.find((a) => {
       const addressHost = normalizeHost(a.options.host);
       const addressPort = a.options.port != null ? String(a.options.port) : undefined;
-      if (addressPort !== expectedPort) return false;
-      if (!normalizedHint || !addressHost) return true;
-      return normalizedHint === addressHost;
+      return addressPort === expectedPort && addressHost === normalizedHint;
     });
     if (exact) {
       addr = exact;
