@@ -1,2 +1,2 @@
 [mcp_servers.deepwiki]
-serverUrl = "https://mcp.deepwiki.com/mcp"
+server_url = "https://mcp.deepwiki.com/mcp"
