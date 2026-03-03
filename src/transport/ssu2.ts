@@ -226,7 +226,7 @@ export class SSU2Transport extends EventEmitter {
   }
 
   private sessionKey(address: string, port: number): string {
-    return `${address}:${port}`;
+    return `${normalizeHost(address) ?? address}:${port}`;
   }
 
   async connect(host: string, port: number, remoteRouterInfo: RouterInfo, timeoutMsOverride?: number): Promise<void> {
