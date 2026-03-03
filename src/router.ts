@@ -433,7 +433,7 @@ export class I2PRouter extends EventEmitter {
       staticPublicKey: Buffer.from(this.identity.identity.encryptionPublicKey),
       routerInfo: this.wireRouterInfo,
       netId: this.options.netId ?? 2,
-      connectTimeoutMs: 5000
+      connectTimeoutMs: 12000
     });
 
     this.ntcp2.on('message', ({ sessionId, data }) => {
@@ -777,8 +777,37 @@ export class I2PRouter extends EventEmitter {
       }
     }
 
-    // NOTE: SSU2 fallback is temporarily disabled for exploratory lookups while
-    // NTCP2 interop is being hardened; SSU2 is not yet reliably interoperable.
+    // 2) SSU2 fallback for peers where NTCP2 fails.
+    if (this.ssu2) {
+      const ssu2Addr = floodfill.addresses.find((a) => {
+        const styleOk = a.transportStyle.toUpperCase().startsWith('SSU2');
+        const host = a.options.host;
+        const hasPort = a.options.port;
+        if (!styleOk || !host || !hasPort) return false;
+        if (host.includes(':') || host.startsWith('[')) return false;
+        return true;
+      });
+
+      if (ssu2Addr) {
+        const host = ssu2Addr.options.host!;
+        const portNum = parseInt(ssu2Addr.options.port, 10);
+        if (host && portNum && !Number.isNaN(portNum)) {
+          try {
+            await this.ssu2.connect(host, portNum, floodfill);
+            const sessionId = `${host}:${portNum}`;
+            this.ssu2.send(sessionId, wire);
+            this.stats.messagesSent++;
+            this.stats.bytesSent += wire.length;
+          } catch (err) {
+            logger.warn(
+              'Exploratory SSU2 lookup failed',
+              { error: (err as Error).message },
+              'Router'
+            );
+          }
+        }
+      }
+    }
   }
 
   private publishRouterInfo(): void {
@@ -1026,8 +1055,31 @@ export class I2PRouter extends EventEmitter {
       }
     }
 
-    // SSU2 path intentionally disabled while transport is MVP-only and not
-    // interoperable with stock routers yet.
+    // SSU2 fallback when NTCP2 is unavailable or fails.
+    if (this.ssu2) {
+      const ssu2Addr = floodfill.addresses.find((a) => {
+        const styleOk = a.transportStyle.toUpperCase().startsWith('SSU2');
+        const host = a.options.host;
+        const hasPort = a.options.port;
+        if (!styleOk || !host || !hasPort) return false;
+        if (host.includes(':') || host.startsWith('[')) return false;
+        return true;
+      });
+      if (ssu2Addr) {
+        const host = ssu2Addr.options.host!;
+        const portNum = parseInt(ssu2Addr.options.port, 10);
+        if (host && portNum && !Number.isNaN(portNum)) {
+          const fromHash = this.routerInfo!.getRouterHash();
+          const msg = I2NPMessages.createDatabaseLookup(targetHash, fromHash, lookupType, []);
+          const wire = I2NPMessages.serializeMessage(msg);
+          await this.ssu2.connect(host, portNum, floodfill);
+          const sessionId = `${host}:${portNum}`;
+          this.ssu2.send(sessionId, wire);
+          this.stats.messagesSent++;
+          this.stats.bytesSent += wire.length;
+        }
+      }
+    }
   }
 
   async buildInboundTunnel(hops = 3): Promise<ReturnType<TunnelManager['buildTunnel']>> {

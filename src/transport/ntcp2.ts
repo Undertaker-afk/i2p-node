@@ -97,6 +97,7 @@ export class NTCP2Transport extends EventEmitter {
   private server: Server | null = null;
   private sessions: Map<string, NTCP2Session> = new Map();
   private options: Required<Pick<NTCP2Options, 'host' | 'port' | 'netId'>> & Omit<NTCP2Options, 'host' | 'port' | 'netId'>;
+  private keepaliveInterval: NodeJS.Timeout | null = null;
 
   constructor(options: NTCP2Options = {}) {
     super();
@@ -114,6 +115,9 @@ export class NTCP2Transport extends EventEmitter {
       this.server = createServer(this.handleConnection.bind(this));
       this.server.on('error', (err) => reject(err));
       this.server.listen(this.options.port, this.options.host, () => {
+        this.keepaliveInterval = setInterval(() => {
+          this.sendKeepalives();
+        }, 25_000);
         const addr = this.server?.address();
         if (addr && typeof addr === 'object') {
           this.emit('listening', { host: addr.address, port: addr.port });
@@ -126,6 +130,10 @@ export class NTCP2Transport extends EventEmitter {
   }
 
   stop(): void {
+    if (this.keepaliveInterval) {
+      clearInterval(this.keepaliveInterval);
+      this.keepaliveInterval = null;
+    }
     if (this.server) {
       this.server.close();
       this.server = null;
@@ -592,9 +600,25 @@ export class NTCP2Transport extends EventEmitter {
 
     session.dp = deriveDataPhase(hs.ck, hs.h, false);
     session.state = 'established';
+    session.socket.setTimeout(0);
     session.recvBuffer = session.recvBuffer.subarray(need);
     this.emit('established', { sessionId });
     return true;
+  }
+
+  private sendKeepalives(): void {
+    const nowSec = Math.floor(Date.now() / 1000) >>> 0;
+    for (const [sessionId, session] of this.sessions.entries()) {
+      if (session.state !== 'established' || !session.dp || session.socket.destroyed) continue;
+      try {
+        const dt = Buffer.alloc(4);
+        dt.writeUInt32BE(nowSec, 0);
+        const framePlain = encodeBlocks([{ type: 0, data: dt }]);
+        this.sendDataFrame(session, framePlain);
+      } catch (err) {
+        this.handleError(sessionId, err instanceof Error ? err : new Error(String(err)));
+      }
+    }
   }
 
   private tryProcessDataFrames(sessionId: string, session: NTCP2Session): boolean {

@@ -16,8 +16,8 @@ const enum SSU2MessageType {
   Nack = 7
 }
 
-const HANDSHAKE_TIMEOUT_MS = 9000;
-const HANDSHAKE_RETRY_DELAYS_MS = [1000, 3000, 7000];
+const HANDSHAKE_TIMEOUT_MS = 12000;
+const HANDSHAKE_RETRY_DELAYS_MS = [1000, 2000, 3000, 4000, 5000];
 const DATA_RETRANSMIT_MS = 800;
 const MAX_DATA_RETRANSMITS = 2;
 const PENDING_PACKET_TTL_MS = 5000;
@@ -180,21 +180,52 @@ export class SSU2Transport extends EventEmitter {
     };
 
     this.sessions.set(id, session);
-    await this.sendHandshakeRequest(session);
 
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timeout);
         this.off('established', onEstablished);
-        reject(new Error('SSU2 connect timeout'));
-      }, HANDSHAKE_TIMEOUT_MS + 1000);
+      };
+
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (session.handshakeTimer) {
+          clearTimeout(session.handshakeTimer);
+          session.handshakeTimer = undefined;
+        }
+        const current = this.sessions.get(id);
+        if (current === session && current.state !== 'established') {
+          this.sessions.delete(id);
+        }
+        reject(err);
+      };
+
+      const succeed = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+
       const onEstablished = ({ sessionId }: { sessionId: string }) => {
         if (sessionId === id) {
-          clearTimeout(timeout);
-          this.off('established', onEstablished);
-          resolve();
+          succeed();
         }
       };
+
+      const timeout = setTimeout(() => {
+        logger.warn('SSU2 connect timeout', { host, port, sessionId: id }, 'SSU2');
+        fail(new Error('SSU2 connect timeout'));
+      }, HANDSHAKE_TIMEOUT_MS + 1000);
+
       this.on('established', onEstablished);
+
+      this.sendHandshakeRequest(session).catch((err) => {
+        fail(err instanceof Error ? err : new Error(String(err)));
+      });
     });
   }
 
