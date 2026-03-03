@@ -144,8 +144,13 @@ export class SSU2Transport extends EventEmitter {
       throw new Error('SSU2 static keys not configured');
     }
 
+    logger.info('SSU2 connect attempt', { host, port }, 'SSU2');
+
     const id = this.sessionKey(host, port);
-    if (this.sessions.get(id)?.state === 'established') return;
+    if (this.sessions.get(id)?.state === 'established') {
+      logger.debug('SSU2 session already established', { sessionId: id }, 'SSU2');
+      return;
+    }
 
     const hs: HandshakeState = initHandshake();
     const eph = Crypto.generateEphemeralKeyPair();
@@ -195,8 +200,13 @@ export class SSU2Transport extends EventEmitter {
 
   send(sessionId: string, data: Buffer): void {
     const s = this.sessions.get(sessionId);
-    if (!s || s.state !== 'established' || !s.sendKey || !this.socket) return;
+    if (!s || s.state !== 'established' || !s.sendKey || !this.socket) {
+      logger.warn('SSU2 send failed: session not ready', { sessionId }, 'SSU2');
+      return;
+    }
     this.touchSession(s);
+
+    logger.debug('SSU2 send data', { sessionId, size: data.length }, 'SSU2');
 
     const packetNumber = s.sendNonce;
     if (s.pendingData.size >= MAX_PENDING_DATA) {
@@ -256,7 +266,12 @@ export class SSU2Transport extends EventEmitter {
   }
 
   private handleMessage(msg: Buffer, rinfo: RemoteInfo): void {
-    if (msg.length < 1 + 8 + 8) return;
+    logger.debug('SSU2 received message', { from: `${rinfo.address}:${rinfo.port}`, size: msg.length }, 'SSU2');
+
+    if (msg.length < 1 + 8 + 8) {
+      logger.warn('SSU2 message too short', { size: msg.length }, 'SSU2');
+      return;
+    }
     const type = msg.readUInt8(0);
     const connIdDest = msg.readBigUInt64BE(1);
     const connIdSrc = msg.readBigUInt64BE(9);
@@ -429,6 +444,7 @@ export class SSU2Transport extends EventEmitter {
     const confirmed = this.buildSessionConfirmed(s);
     this.sendFireAndForget(confirmed, s.address, s.port, 'SessionConfirmed');
     s.state = 'established';
+    logger.info('SSU2 session established (initiator)', { sessionId: this.sessionKey(s.address, s.port) }, 'SSU2');
     this.emit('established', { sessionId: this.sessionKey(s.address, s.port) });
   }
 
@@ -457,6 +473,7 @@ export class SSU2Transport extends EventEmitter {
     if (plain.toString('utf8') !== 'CONFIRMED') return;
 
     s.state = 'established';
+    logger.info('SSU2 session established (responder)', { sessionId: this.sessionKey(s.address, s.port) }, 'SSU2');
     this.emit('established', { sessionId: this.sessionKey(s.address, s.port) });
   }
 

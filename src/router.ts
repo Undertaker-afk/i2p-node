@@ -890,12 +890,13 @@ export class I2PRouter extends EventEmitter {
       const host = ssu2Addr.options.host;
       const port = parseInt(ssu2Addr.options.port || '0');
       if (host && port > 0) {
+        logger.info('NTCP2 failed, falling back to SSU2', { host, port }, 'Router');
         const sessionId = `${host}:${port}`;
         try {
           await this.ssu2.connect(host, port, routerInfo);
           this.ssu2.send(sessionId, serialized);
         } catch (err) {
-          // Ignore
+          logger.warn('SSU2 fallback also failed', { host, port, error: (err as Error).message }, 'Router');
         }
       }
     }
