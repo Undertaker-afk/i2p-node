@@ -480,6 +480,8 @@ export class I2PRouter extends EventEmitter {
       },
       signingPrivateKey: this.identity!.signingPrivateKey
     });
+
+    this.routerInfo!.setWireFormatData(this.wireRouterInfo);
   }
 
   private buildCaps(): string {
@@ -763,10 +765,19 @@ export class I2PRouter extends EventEmitter {
       const ri = this.netDb.lookupRouterInfo(key);
       if (ri && this.ntcp2) {
         const riWire = ri.getWireFormatData();
-        if (!riWire) {
-          logger.debug('DatabaseLookup: RouterInfo found but original I2P wire bytes unavailable; skipping DatabaseStore reply', undefined, 'Router');
+        const fallbackLocalWire = this.routerInfo && ri.getRouterHash().equals(this.routerInfo.getRouterHash())
+          ? this.wireRouterInfo
+          : null;
+        const replyRiWire = riWire ?? fallbackLocalWire;
+
+        if (!replyRiWire) {
+          logger.warn(
+            `DatabaseLookup: RouterInfo found for ${key.toString('hex').slice(0, 16)}... but no I2P wire bytes available; skipping DatabaseStore reply`,
+            undefined,
+            'Router'
+          );
         } else {
-          const compressed = gzipSync(riWire);
+          const compressed = gzipSync(replyRiWire);
           if (compressed.length > 0xFFFF) {
             logger.warn(`DatabaseLookup: compressed RouterInfo too large (${compressed.length} bytes)`, undefined, 'Router');
           } else {
