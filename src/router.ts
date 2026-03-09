@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { gunzipSync } from 'zlib';
+import { gunzipSync, gzipSync } from 'zlib';
 import { Crypto } from './crypto/index.js';
 import { RouterIdentity, RouterInfo, RouterAddress } from './data/router-info.js';
 import { LeaseSet } from './data/lease-set.js';
@@ -16,6 +16,7 @@ import { logger, LogLevel } from './utils/logger.js';
 import { SimpleWebUI } from './webui/simple-server.js';
 import { StreamingManager, Stream } from './streaming/session.js';
 import { base32DecodeToHash } from './i2p/base32.js';
+import { NetDbRequests, PendingRequest } from './netdb/requests.js';
 import { ed25519 } from '@noble/curves/ed25519';
 import { buildIdentityExEd25519X25519, IdentityExBuildResult } from './i2p/identity/identity-ex.js';
 import { writeRouterInfoEd25519, makeNtcp2PublishedOptions } from './i2p/routerinfo/writer.js';
@@ -61,6 +62,7 @@ export class I2PRouter extends EventEmitter {
   private sam: SAMProtocol | null = null;
   private webUI: SimpleWebUI | null = null;
   private streaming: StreamingManager | null = null;
+  private netDbRequests: NetDbRequests;
   private options: I2PRouterOptions;
   private stats: RouterStats;
   private running = false;
@@ -112,8 +114,10 @@ export class I2PRouter extends EventEmitter {
       dataDir: this.options.dataDir
     });
     this.peerProfiles = new PeerProfileManager();
+    this.netDbRequests = new NetDbRequests();
     
     this.setupNetDbListeners();
+    this.setupNetDbRequestListeners();
     this.setupLogging();
   }
 
@@ -124,6 +128,9 @@ export class I2PRouter extends EventEmitter {
       
       // Add to peer profiles
       this.peerProfiles.addPeer(routerInfo);
+      
+      // Complete any pending request for this router
+      this.netDbRequests.requestComplete(hash, true);
       
       // Update stats
       this.stats.knownPeers = this.netDb.getRouterInfoCount();
@@ -143,11 +150,77 @@ export class I2PRouter extends EventEmitter {
         'Router'
       );
 
+      // Track the exploratory request
+      this.netDbRequests.createRequest(targetHash, true);
+
       // Fire and forget: connect to the floodfill over NTCP2 and send a DatabaseLookup
       this.sendExploratoryLookup(targetHash, floodfill).catch((err) => {
         logger.warn('Failed exploratory lookup send', { error: (err as Error).message }, 'Router');
       });
     });
+
+    // Listen for LeaseSet lookup requests (type 0 = normal/any)
+    this.netDb.on('leaseSetLookup', ({ targetHash, floodfill }: { targetHash: Buffer; floodfill: RouterInfo }) => {
+      logger.debug(
+        `LeaseSet lookup for ${targetHash.toString('hex').slice(0, 16)}... via ${floodfill.getRouterHash().toString('hex').slice(0, 16)}...`,
+        undefined,
+        'Router'
+      );
+      this.sendDatabaseLookup(targetHash, floodfill, 0).catch((err) => {
+        logger.debug(`LeaseSet lookup failed: ${(err as Error).message}`, undefined, 'Router');
+      });
+    });
+  }
+
+  /**
+   * Wire up NetDbRequests events to perform actual network lookups.
+   */
+  private setupNetDbRequestListeners(): void {
+    // When NetDbRequests wants to request a new/unknown router's info
+    this.netDbRequests.on('requestRouter', (hash: Buffer) => {
+      const existing = this.netDb.lookupRouterInfo(hash);
+      if (existing) {
+        // Already known — skip
+        return;
+      }
+      if (this.netDbRequests.hasRequest(hash)) {
+        // Already being requested
+        return;
+      }
+
+      const req = this.netDbRequests.createRequest(hash, false);
+      if (req) {
+        this.sendNextLookupRequest(req).catch((err) => {
+          logger.debug(`requestRouter lookup failed: ${(err as Error).message}`, undefined, 'NetDbReq');
+        });
+      }
+    });
+
+    // When NetDbRequests wants to retry / send next attempt for a request
+    this.netDbRequests.on('sendNextRequest', (req: PendingRequest) => {
+      this.sendNextLookupRequest(req).catch((err) => {
+        logger.debug(`sendNextRequest failed: ${(err as Error).message}`, undefined, 'NetDbReq');
+      });
+    });
+  }
+
+  /**
+   * Send the next DatabaseLookup for a pending request to the closest
+   * non-excluded floodfill.
+   */
+  private async sendNextLookupRequest(req: PendingRequest): Promise<void> {
+    const floodfills = this.netDb.findClosestFloodfills(req.destination, 5);
+    // Pick the first floodfill not yet excluded
+    const ff = floodfills.find(f => !req.excludedPeers.has(f.getRouterHash().toString('hex')));
+    if (!ff) {
+      logger.debug('No more floodfills for lookup', undefined, 'NetDbReq');
+      this.netDbRequests.requestComplete(req.destination, false);
+      return;
+    }
+
+    const lookupType = req.isExploratory ? 3 : 2; // 3=exploratory, 2=routerInfo
+    this.netDbRequests.recordAttempt(req.destination, ff.getRouterHash());
+    await this.sendDatabaseLookup(req.destination, ff, lookupType as 0 | 1 | 2 | 3);
   }
 
   private setupLogging(): void {
@@ -207,6 +280,7 @@ export class I2PRouter extends EventEmitter {
 
       // Start NetDb (loads from disk and reseeds if needed)
       await this.netDb.start();
+      this.netDbRequests.start();
       
       await this.startTransports();
       await this.startSAM();
@@ -264,6 +338,7 @@ export class I2PRouter extends EventEmitter {
       this.maintenanceInterval = null;
     }
 
+    this.netDbRequests?.stop();
     this.netDb?.stop();
     this.ntcp2?.stop();
     this.ssu2?.stop();
@@ -405,6 +480,8 @@ export class I2PRouter extends EventEmitter {
       },
       signingPrivateKey: this.identity!.signingPrivateKey
     });
+
+    this.routerInfo!.setWireFormatData(this.wireRouterInfo);
   }
 
   private buildCaps(): string {
@@ -540,12 +617,36 @@ export class I2PRouter extends EventEmitter {
     const replyToken = buf.readUInt32BE(33);
 
     let offset = 37;
+    let replyTunnelId = 0;
+    let _replyGateway: Buffer | null = null;
     if (replyToken > 0) {
       if (buf.length < offset + 4 + 32) return;
-      // const replyTunnelId = buf.readUInt32BE(offset);
+      replyTunnelId = buf.readUInt32BE(offset);
       offset += 4;
-      // const replyGateway = buf.subarray(offset, offset + 32);
+      _replyGateway = buf.subarray(offset, offset + 32);
       offset += 32;
+
+      // Send DeliveryStatus reply (per i2pd HandleDatabaseStoreMsg)
+      if (replyToken !== 0xFFFFFFFF && this.ntcp2) {
+        const deliveryStatus = I2NPMessages.createDeliveryStatus(replyToken, Date.now());
+        const dsWire = I2NPMessages.serializeMessage(deliveryStatus);
+        if (replyTunnelId === 0) {
+          // Direct reply to the gateway router from DatabaseStore fields.
+          const replySessionId = _replyGateway ? this.ntcp2.findSessionIdByRouterHash(_replyGateway) : null;
+          if (replySessionId) {
+            this.ntcp2.send(replySessionId, dsWire);
+          } else {
+            logger.debug('DatabaseStore: no established session to reply gateway; falling back to source session', undefined, 'Router');
+            this.ntcp2.send(sessionId, dsWire);
+          }
+        } else {
+          // Reply through tunnel — wrap in TunnelGateway
+          // For now send directly to the session; full tunnel routing is TODO
+          this.ntcp2.send(sessionId, dsWire);
+        }
+        this.stats.messagesSent++;
+        this.stats.bytesSent += dsWire.length;
+      }
     }
 
     const data = buf.subarray(offset);
@@ -619,33 +720,112 @@ export class I2PRouter extends EventEmitter {
   }
 
   private handleDatabaseLookup(sessionId: string, message: ReturnType<typeof I2NPMessages.parseMessage>): void {
-    // Payload (subset of spec): key(32) | from(32) | flags(1) | size(2) | excluded[size*32]
+    // Payload (subset of spec): key(32) | from(32) | flags(1) | [replyTunnelId(4) if delivery flag] | size(2) | excluded[size*32]
     const buf = message.payload;
     if (buf.length < 32 + 32 + 1 + 2) return;
 
     const key = buf.subarray(0, 32);
-    // const fromHash = buf.subarray(32, 64);
+    const _fromHash = buf.subarray(32, 64);
     const flags = buf.readUInt8(64);
-    const size = buf.readUInt16BE(65);
+
+    const hasDeliveryFlag = (flags & 0x01) !== 0;
+    let excludedOffset = 65;
+    // let replyTunnelId = 0;
+    if (hasDeliveryFlag) {
+      if (buf.length < excludedOffset + 4) return;
+      // replyTunnelId = buf.readUInt32BE(excludedOffset);
+      excludedOffset += 4;
+    }
+
+    if (buf.length < excludedOffset + 2) return;
+    const numExcluded = buf.readUInt16BE(excludedOffset);
+    excludedOffset += 2;
 
     const lookupTypeBits = (flags >> 2) & 0x03;
+    // 0=normal, 1=leaseSet, 2=routerInfo, 3=exploratory
     const lookupType = lookupTypeBits;
 
     logger.debug(
-      `DatabaseLookup received for ${key.toString('hex').slice(0, 16)}... (type=${lookupType})`,
+      `DatabaseLookup received for ${key.toString('hex').slice(0, 16)}... (type=${lookupType}, excluded=${numExcluded})`,
       undefined,
       'Router'
     );
 
-    const ri = this.netDb.lookupRouterInfo(key);
-    if (ri && this.ntcp2) {
-      const data = ri.serialize();
-      const fromHash = this.routerInfo!.getRouterHash();
-      const replyToken = 0;
-      const storeMsg = I2NPMessages.createDatabaseStore(key, data, replyToken, fromHash);
-      const wire = I2NPMessages.serializeMessage(storeMsg);
-      this.ntcp2.send(sessionId, wire);
+    // Build excluded set for search reply
+    const excludedSet = new Set<string>();
+    for (let i = 0; i < numExcluded && excludedOffset + 32 <= buf.length; i++) {
+      excludedSet.add(buf.subarray(excludedOffset, excludedOffset + 32).toString('hex'));
+      excludedOffset += 32;
+    }
 
+    let replied = false;
+
+    // Try RouterInfo lookup (for normal or routerInfo type)
+    if (lookupType === 0 || lookupType === 2) {
+      const ri = this.netDb.lookupRouterInfo(key);
+      if (ri && this.ntcp2) {
+        const riWire = ri.getWireFormatData();
+        const fallbackLocalWire = this.routerInfo && ri.getRouterHash().equals(this.routerInfo.getRouterHash())
+          ? this.wireRouterInfo
+          : null;
+        const replyRiWire = riWire ?? fallbackLocalWire;
+
+        if (!replyRiWire) {
+          logger.warn(
+            `DatabaseLookup: RouterInfo found for ${key.toString('hex').slice(0, 16)}... but no I2P wire bytes available; skipping DatabaseStore reply`,
+            undefined,
+            'Router'
+          );
+        } else {
+          const compressed = gzipSync(replyRiWire);
+          if (compressed.length > 0xFFFF) {
+            logger.warn(`DatabaseLookup: compressed RouterInfo too large (${compressed.length} bytes)`, undefined, 'Router');
+          } else {
+            const size = Buffer.alloc(2);
+            size.writeUInt16BE(compressed.length);
+            const data = Buffer.concat([size, compressed]);
+            const ourHash = this.routerInfo!.getRouterHash();
+            const storeMsg = I2NPMessages.createDatabaseStore(key, data, 0, ourHash);
+            const wire = I2NPMessages.serializeMessage(storeMsg);
+            this.ntcp2.send(sessionId, wire);
+            this.stats.messagesSent++;
+            this.stats.bytesSent += wire.length;
+            replied = true;
+          }
+        }
+      }
+    }
+
+    // Try LeaseSet lookup (for normal or leaseSet type)
+    if (!replied && (lookupType === 0 || lookupType === 1)) {
+      const ls = this.netDb.lookupLeaseSet(key);
+      if (ls && this.ntcp2) {
+        const lsData = ls.getWireFormatData();
+        if (!lsData) {
+          logger.debug('DatabaseLookup: LeaseSet found but original I2P wire bytes unavailable; skipping DatabaseStore reply', undefined, 'Router');
+        } else {
+          const ourHash = this.routerInfo!.getRouterHash();
+          const storeMsg = I2NPMessages.createDatabaseStore(key, lsData, 0, ourHash, ls.storeType);
+          const wire = I2NPMessages.serializeMessage(storeMsg);
+          this.ntcp2.send(sessionId, wire);
+          this.stats.messagesSent++;
+          this.stats.bytesSent += wire.length;
+          replied = true;
+        }
+      }
+    }
+
+    // Exploratory: return closest non-floodfill peers (per i2pd)
+    // For any lookup type: if we couldn't answer, send DatabaseSearchReply with closest floodfills
+    if (!replied && this.ntcp2) {
+      const closestFloodfills = this.netDb.findClosestFloodfills(key, 3);
+      const routerHashes = closestFloodfills
+        .filter(ff => !excludedSet.has(ff.getRouterHash().toString('hex')))
+        .map(ff => ff.getRouterHash());
+      const ourHash = this.routerInfo!.getRouterHash();
+      const searchReply = I2NPMessages.createDatabaseSearchReply(key, routerHashes, ourHash);
+      const wire = I2NPMessages.serializeMessage(searchReply);
+      this.ntcp2.send(sessionId, wire);
       this.stats.messagesSent++;
       this.stats.bytesSent += wire.length;
     }
@@ -654,6 +834,26 @@ export class I2PRouter extends EventEmitter {
   }
 
   private handleDatabaseSearchReply(sessionId: string, message: ReturnType<typeof I2NPMessages.parseMessage>): void {
+    const parsed = I2NPMessages.parseDatabaseSearchReply(message.payload);
+    if (!parsed) {
+      logger.debug('Failed to parse DatabaseSearchReply', undefined, 'Router');
+      return;
+    }
+
+    const { key, routerHashes, from: _from } = parsed;
+    logger.debug(
+      `DatabaseSearchReply for ${key.toString('hex').slice(0, 16)}... with ${routerHashes.length} peers`,
+      undefined,
+      'Router'
+    );
+
+    // Determine if this was an exploratory request
+    const pendingReq = this.netDbRequests.findRequest(key);
+    const isExploratory = pendingReq ? pendingReq.isExploratory : false;
+
+    // Delegate to NetDbRequests which handles retry logic and discovered router scheduling
+    this.netDbRequests.handleSearchReply(key, routerHashes, isExploratory);
+
     this.emit('databaseSearchReply', { sessionId, message });
   }
 
@@ -667,6 +867,33 @@ export class I2PRouter extends EventEmitter {
 
   private handleTunnelBuildReply(sessionId: string, message: ReturnType<typeof I2NPMessages.parseMessage>): void {
     this.emit('tunnelBuildReply', { sessionId, message });
+  }
+
+
+  /**
+   * Pick a usable NTCP/NTCP2 endpoint from RouterInfo.
+   * Supports IPv4 and IPv6 literals (bracketed or plain) and requires s/i keys.
+   */
+  private getNtcpEndpoint(routerInfo: RouterInfo): { host: string; port: number } | null {
+    const addr = routerInfo.addresses.find((a) => {
+      const styleOk = a.transportStyle.toUpperCase().startsWith('NTCP');
+      const host = a.options.host;
+      const hasKeys = a.options.s && a.options.i && a.options.port;
+      return Boolean(styleOk && host && hasKeys);
+    });
+    if (!addr?.options.host || !addr.options.port) return null;
+
+    const rawHost = addr.options.host.trim();
+    const host = rawHost.startsWith('[') && rawHost.endsWith(']')
+      ? rawHost.slice(1, -1)
+      : rawHost;
+
+    const port = parseInt(addr.options.port, 10);
+    if (!host || Number.isNaN(port) || port <= 0 || port > 65535) {
+      return null;
+    }
+
+    return { host, port };
   }
 
   private setupTunnelListeners(): void {
@@ -727,47 +954,31 @@ export class I2PRouter extends EventEmitter {
     const msg = I2NPMessages.createDatabaseLookup(
       targetHash,
       fromHash,
-      2, // lookup type 2 = Exploration (peer discovery mode; floodfills return closest known floodfills)
+      3, // lookup type 3 = Exploratory (peer discovery mode; floodfills return closest known routers)
       []
     );
     const wire = I2NPMessages.serializeMessage(msg);
 
-    // 1) Try NTCP2 (or NTCP v=2) if present with full keys (host/port/s/i).
+    // 1) Try NTCP2 if present with full keys (host/port/s/i).
     if (this.ntcp2) {
-      // Prefer IPv4 NTCP/NTCP2 addresses with full s/i options; skip IPv6/Ygg/Yggdrasil for now.
-      const ntcpAddr = floodfill.addresses.find((a) => {
-        const styleOk = a.transportStyle.toUpperCase().startsWith('NTCP');
-        const host = a.options.host;
-        const hasKeys = a.options.s && a.options.i && a.options.port;
-        if (!styleOk || !host || !hasKeys) return false;
-        // crude IPv4 detection: no ':' and not bracketed.
-        if (host.includes(':') || host.startsWith('[')) return false;
-        return true;
-      });
-
-      if (ntcpAddr) {
-        const host = ntcpAddr.options.host;
-        const portNum = parseInt(ntcpAddr.options.port, 10);
-        if (!host || !portNum || Number.isNaN(portNum)) {
-          logger.debug('Invalid NTCP2 address for floodfill', { host, port: ntcpAddr.options.port }, 'Router');
-        } else {
-          try {
-            await this.ntcp2.connect(host, portNum, floodfill);
-            const sessionId = `${host}:${portNum}`;
-            this.ntcp2.send(sessionId, wire);
-            this.stats.messagesSent++;
-            this.stats.bytesSent += wire.length;
-            return;
-          } catch (err) {
-            logger.warn(
-              'Exploratory NTCP2 lookup failed, will consider SSU2 fallback',
-              { error: (err as Error).message },
-              'Router'
-            );
-          }
+      const endpoint = this.getNtcpEndpoint(floodfill);
+      if (endpoint) {
+        try {
+          await this.ntcp2.connect(endpoint.host, endpoint.port, floodfill);
+          const sessionId = `${endpoint.host}:${endpoint.port}`;
+          this.ntcp2.send(sessionId, wire);
+          this.stats.messagesSent++;
+          this.stats.bytesSent += wire.length;
+          return;
+        } catch (err) {
+          logger.warn(
+            'Exploratory NTCP2 lookup failed, will consider SSU2 fallback',
+            { error: (err as Error).message },
+            'Router'
+          );
         }
       } else {
-        logger.debug('No IPv4 NTCP/NTCP2 address with s/i found for floodfill', undefined, 'Router');
+        logger.debug('No NTCP/NTCP2 address with s/i found for floodfill', undefined, 'Router');
       }
     }
 
@@ -887,30 +1098,19 @@ export class I2PRouter extends EventEmitter {
     floodfill: RouterInfo,
     lookupType: 0 | 1 | 2 | 3
   ): Promise<void> {
-    // Prefer IPv4 NTCP2/NTCP with full keys; SSU2 fallback is disabled for now.
+    // Prefer NTCP2/NTCP with full keys.
     if (this.ntcp2) {
-      const ntcpAddr = floodfill.addresses.find((a) => {
-        const styleOk = a.transportStyle.toUpperCase().startsWith('NTCP');
-        const host = a.options.host;
-        const hasKeys = a.options.s && a.options.i && a.options.port;
-        if (!styleOk || !host || !hasKeys) return false;
-        if (host.includes(':') || host.startsWith('[')) return false;
-        return true;
-      });
-      if (ntcpAddr) {
-        const host = ntcpAddr.options.host!;
-        const portNum = parseInt(ntcpAddr.options.port, 10);
-        if (host && portNum && !Number.isNaN(portNum)) {
-          const fromHash = this.routerInfo!.getRouterHash();
-          const msg = I2NPMessages.createDatabaseLookup(targetHash, fromHash, lookupType, []);
-          const wire = I2NPMessages.serializeMessage(msg);
-          await this.ntcp2.connect(host, portNum, floodfill);
-          const sessionId = `${host}:${portNum}`;
-          this.ntcp2.send(sessionId, wire);
-          this.stats.messagesSent++;
-          this.stats.bytesSent += wire.length;
-          return;
-        }
+      const endpoint = this.getNtcpEndpoint(floodfill);
+      if (endpoint) {
+        const fromHash = this.routerInfo!.getRouterHash();
+        const msg = I2NPMessages.createDatabaseLookup(targetHash, fromHash, lookupType, []);
+        const wire = I2NPMessages.serializeMessage(msg);
+        await this.ntcp2.connect(endpoint.host, endpoint.port, floodfill);
+        const sessionId = `${endpoint.host}:${endpoint.port}`;
+        this.ntcp2.send(sessionId, wire);
+        this.stats.messagesSent++;
+        this.stats.bytesSent += wire.length;
+        return;
       }
     }
 

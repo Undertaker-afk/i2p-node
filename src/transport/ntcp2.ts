@@ -2,6 +2,7 @@ import { Socket, createServer, Server } from 'net';
 import { EventEmitter } from 'events';
 import { Crypto } from '../crypto/index.js';
 import { RouterInfo } from '../data/router-info.js';
+import { parseI2PRouterInfo } from '../data/router-info-i2p.js';
 import { logger } from '../utils/logger.js';
 import { i2pBase64Decode } from '../i2p/base64.js';
 import { ed25519 } from '@noble/curves/ed25519';
@@ -247,6 +248,21 @@ export class NTCP2Transport extends EventEmitter {
   hasSession(host: string, port: number): boolean {
     const session = this.sessions.get(`${host}:${port}`);
     return !!session && session.state === 'established' && !session.socket.destroyed;
+  }
+
+  /** Find an established session by remote router hash. */
+  findSessionIdByRouterHash(routerHash: Uint8Array): string | null {
+    const target = Buffer.from(routerHash);
+    for (const [sessionId, session] of this.sessions) {
+      if (
+        session.state === 'established' &&
+        session.remoteRouterHash &&
+        Buffer.compare(session.remoteRouterHash, target) === 0
+      ) {
+        return sessionId;
+      }
+    }
+    return null;
   }
 
   getBoundPort(): number | null {
@@ -589,6 +605,11 @@ export class NTCP2Transport extends EventEmitter {
     const blocks = decodeBlocks(plain);
     const riBlk = blocks.find((b) => b.type === 2);
     if (!riBlk) throw new Error('missing routerinfo block');
+
+    const remoteRouterInfo = parseI2PRouterInfo(riBlk.data.subarray(1));
+    if (remoteRouterInfo) {
+      session.remoteRouterHash = Buffer.from(remoteRouterInfo.getRouterHash());
+    }
 
     session.dp = deriveDataPhase(hs.ck, hs.h, false);
     session.state = 'established';

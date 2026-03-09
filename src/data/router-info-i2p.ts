@@ -192,7 +192,9 @@ export function parseI2PRouterInfo(buffer: Buffer): RouterInfo | null {
     // We don't retain the real signature here; use a non-empty placeholder
     const signature = Buffer.alloc(64);
 
-    return new RouterInfo(identity, addresses, riOptions, publishedMs, signature);
+    const routerInfo = new RouterInfo(identity, addresses, riOptions, publishedMs, signature);
+    routerInfo.setWireFormatData(buffer);
+    return routerInfo;
   } catch (err) {
     logger.error('I2P-RI: parse failed', { error: (err as Error).message }, 'I2P-RI');
     return null;

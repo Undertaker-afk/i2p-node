@@ -38,6 +38,8 @@ export class NetworkDatabase extends EventEmitter {
   private isRunning = false;
   private exploratoryTimer: NodeJS.Timeout | null = null;
   private maintenanceTimer: NodeJS.Timeout | null = null;
+  private startedAt = 0;
+  private lastLeaseSetLookupAt = 0;
 
   constructor(options: NetDbOptions = {}) {
     super();
@@ -100,6 +102,7 @@ export class NetworkDatabase extends EventEmitter {
     }
 
     // Start exploratory peer discovery
+    this.startedAt = Date.now();
     this.startExploratory();
     this.startMaintenance();
     
@@ -119,7 +122,7 @@ export class NetworkDatabase extends EventEmitter {
     this.isRunning = false;
     
     if (this.exploratoryTimer) {
-      clearInterval(this.exploratoryTimer);
+      clearTimeout(this.exploratoryTimer);
       this.exploratoryTimer = null;
     }
     
@@ -164,10 +167,18 @@ export class NetworkDatabase extends EventEmitter {
    * This periodically requests router infos from connected peers
    */
   private startExploratory(): void {
-    // Every 30 seconds, try to discover new peers
-    this.exploratoryTimer = setInterval(() => {
+    // Explore immediately on start, then use adaptive interval:
+    // - During bootstrap (first 60s): every 5 seconds
+    // - After bootstrap: every 30 seconds
+    this.exploreNewPeers();
+
+    const tick = () => {
       this.exploreNewPeers();
-    }, 30000);
+      const bootstrapping = (Date.now() - this.startedAt) < 60_000;
+      const nextMs = bootstrapping ? 5_000 : 30_000;
+      this.exploratoryTimer = setTimeout(tick, nextMs);
+    };
+    this.exploratoryTimer = setTimeout(tick, 5_000);
     
     logger.debug('Started exploratory peer discovery', undefined, 'NetDb');
   }
@@ -188,8 +199,9 @@ export class NetworkDatabase extends EventEmitter {
     // Generate a random hash to search for
     const randomHash = createHash('sha256').update(Math.random().toString()).digest();
     
-    // Find closest floodfills
-    const closestFloodfills = this.findClosestFloodfills(randomHash, 2);
+    // Find closest floodfills — try more during bootstrap for faster peer discovery
+    const bootstrapping = (Date.now() - this.startedAt) < 60_000;
+    const closestFloodfills = this.findClosestFloodfills(randomHash, bootstrapping ? 10 : 3);
     
     logger.debug(`Exploring peers near ${randomHash.toString('hex').slice(0, 16)}...`, {
       closestFloodfills: closestFloodfills.length
@@ -201,6 +213,23 @@ export class NetworkDatabase extends EventEmitter {
         targetHash: randomHash,
         floodfill: floodfill
       });
+    }
+
+    // Also do normal (type 0) lookups for random hashes to discover LeaseSets.
+    // Keep this aggressive during bootstrap, then back off to one lookup every
+    // 30s until we receive at least one LeaseSet.
+    const now = Date.now();
+    const shouldLookupLeaseSets =
+      this.leaseSets.size === 0 &&
+      (bootstrapping || (now - this.lastLeaseSetLookupAt) >= 30_000);
+
+    if (shouldLookupLeaseSets) {
+      const lsHash = createHash('sha256').update(Date.now().toString() + Math.random().toString()).digest();
+      const lsFloodfills = this.findClosestFloodfills(lsHash, bootstrapping ? 3 : 1);
+      for (const ff of lsFloodfills) {
+        this.emit('leaseSetLookup', { targetHash: lsHash, floodfill: ff });
+      }
+      this.lastLeaseSetLookupAt = now;
     }
   }
 
@@ -319,7 +348,8 @@ export class NetworkDatabase extends EventEmitter {
     
     if (this.routerInfos.has(key)) {
       const existing = this.routerInfos.get(key)!;
-      if (existing.timestamp >= routerInfo.published) {
+      const existingRi = existing.data as RouterInfo;
+      if (existingRi.published >= routerInfo.published) {
         return false;
       }
     }
@@ -332,7 +362,9 @@ export class NetworkDatabase extends EventEmitter {
       key: hash,
       data: routerInfo,
       type: 'routerInfo',
-      timestamp: routerInfo.published
+      // Keep insertion/update time for local expiration checks.
+      // Published timestamp can be old for valid reseed RouterInfos.
+      timestamp: Date.now()
     });
     
     if (this.isFloodfillRouter(routerInfo)) {
@@ -440,9 +472,36 @@ export class NetworkDatabase extends EventEmitter {
 
   private verifyLeaseSet(leaseSet: LeaseSet): boolean {
     if (!leaseSet.signature || leaseSet.signature.length === 0) {
+      logger.debug('LeaseSet rejected: missing signature', undefined, 'NetDb');
       return false;
     }
-    
+
+    // Validate lease count (per i2pd: MAX_NUM_LEASES = 16)
+    const leases = leaseSet.leases;
+    if (!leases || leases.length === 0) {
+      logger.debug('LeaseSet rejected: no leases', undefined, 'NetDb');
+      return false;
+    }
+    if (leases.length > 16) {
+      logger.debug(`LeaseSet rejected: too many leases (${leases.length})`, undefined, 'NetDb');
+      return false;
+    }
+
+    // Validate expiration: reject already-expired LeaseSets
+    const expiration = leaseSet.getExpiration();
+    const now = Date.now();
+    if (expiration <= now) {
+      logger.debug('LeaseSet rejected: already expired', undefined, 'NetDb');
+      return false;
+    }
+
+    // Reject LeaseSets with expiration too far in the future (> 11 minutes per i2pd)
+    const maxFuture = 11 * 60 * 1000; // 11 minutes
+    if (expiration > now + maxFuture) {
+      logger.debug('LeaseSet rejected: expiration too far in the future', undefined, 'NetDb');
+      return false;
+    }
+
     return true;
   }
 

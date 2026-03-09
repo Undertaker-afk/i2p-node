@@ -62,15 +62,15 @@ export class I2NPMessages {
     data: Buffer,
     replyToken: number,
     fromHash: Uint8Array,
-    storeType: 'routerInfo' | 'leaseSet' = 'routerInfo'
+    storeType = 0
   ): I2NPMessage {
     // DatabaseStore payload (simplified):
     // key(32) | type(1=RouterInfo) | replyToken(4) |
     // [ reply_tunnelId(4) | reply_gateway(32) if replyToken>0 ] | data...
     const keyBuf = Buffer.from(key);
     const typeBuf = Buffer.alloc(1);
-    // 0 => RouterInfo, 1 => LeaseSet (minimal subset)
-    typeBuf.writeUInt8(storeType === 'routerInfo' ? 0 : 1);
+    // 0 => RouterInfo, 1 => LS1, 3 => LS2 (and other DatabaseStore types as needed)
+    typeBuf.writeUInt8(storeType & 0xFF);
 
     const replyTokenBuf = Buffer.alloc(4);
     replyTokenBuf.writeUInt32BE(replyToken);
@@ -161,6 +161,65 @@ export class I2NPMessages {
       expiration: Date.now() + 30000,
       payload
     };
+  }
+
+  /**
+   * Create a DatabaseSearchReply message.
+   * Wire format: key(32) | num(1) | routers(N*32) | from(32)
+   */
+  static createDatabaseSearchReply(
+    key: Uint8Array,
+    routerHashes: Uint8Array[],
+    fromHash: Uint8Array
+  ): I2NPMessage {
+    const count = Math.min(routerHashes.length, 16);
+    const keyBuf = Buffer.from(key);
+    const numBuf = Buffer.alloc(1);
+    numBuf.writeUInt8(count);
+    const fromBuf = Buffer.from(fromHash);
+
+    const parts: Buffer[] = [keyBuf, numBuf];
+    for (let i = 0; i < count; i++) {
+      parts.push(Buffer.from(routerHashes[i]));
+    }
+    parts.push(fromBuf);
+
+    const payload = Buffer.concat(parts);
+
+    return {
+      type: I2NPMessageType.DATABASE_SEARCH_REPLY,
+      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      expiration: Date.now() + 30000,
+      payload
+    };
+  }
+
+  /**
+   * Parse a DatabaseSearchReply payload.
+   * Wire format: key(32) | num(1) | routers(N*32) | from(32)
+   */
+  static parseDatabaseSearchReply(payload: Buffer): {
+    key: Buffer;
+    routerHashes: Buffer[];
+    from: Buffer;
+  } | null {
+    if (payload.length < 32 + 1 + 32) return null;
+
+    const key = payload.subarray(0, 32);
+    const num = payload.readUInt8(32);
+
+    const expectedLen = 33 + num * 32 + 32;
+    if (payload.length < expectedLen) return null;
+
+    const routerHashes: Buffer[] = [];
+    let offset = 33;
+    for (let i = 0; i < num; i++) {
+      routerHashes.push(payload.subarray(offset, offset + 32));
+      offset += 32;
+    }
+
+    const from = payload.subarray(offset, offset + 32);
+    return { key, routerHashes, from };
   }
 
   static createDeliveryStatus(
