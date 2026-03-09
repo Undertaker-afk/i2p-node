@@ -55,6 +55,9 @@ export class LeaseSet {
   signingKey: Uint8Array;
   leases: Lease[];
   signature: Uint8Array | null;
+  /** DatabaseStore type for replay: LS1=1, LS2=3. */
+  storeType: number;
+  private wireFormatData: Buffer | null;
 
   constructor(
     destination: RouterIdentity,
@@ -68,6 +71,16 @@ export class LeaseSet {
     this.signingKey = signingKey;
     this.leases = leases;
     this.signature = signature;
+    this.storeType = 1;
+    this.wireFormatData = null;
+  }
+
+  setWireFormatData(data: Buffer): void {
+    this.wireFormatData = Buffer.from(data);
+  }
+
+  getWireFormatData(): Buffer | null {
+    return this.wireFormatData ? Buffer.from(this.wireFormatData) : null;
   }
 
   getHash(): Buffer {

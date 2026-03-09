@@ -62,15 +62,15 @@ export class I2NPMessages {
     data: Buffer,
     replyToken: number,
     fromHash: Uint8Array,
-    storeType: 'routerInfo' | 'leaseSet' = 'routerInfo'
+    storeType = 0
   ): I2NPMessage {
     // DatabaseStore payload (simplified):
     // key(32) | type(1=RouterInfo) | replyToken(4) |
     // [ reply_tunnelId(4) | reply_gateway(32) if replyToken>0 ] | data...
     const keyBuf = Buffer.from(key);
     const typeBuf = Buffer.alloc(1);
-    // 0 => RouterInfo, 1 => LeaseSet (minimal subset)
-    typeBuf.writeUInt8(storeType === 'routerInfo' ? 0 : 1);
+    // 0 => RouterInfo, 1 => LS1, 3 => LS2 (and other DatabaseStore types as needed)
+    typeBuf.writeUInt8(storeType & 0xFF);
 
     const replyTokenBuf = Buffer.alloc(4);
     replyTokenBuf.writeUInt32BE(replyToken);
