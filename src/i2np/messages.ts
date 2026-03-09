@@ -19,6 +19,19 @@ export interface DatabaseLookupOptions {
   eciesSessionTag?: Uint8Array;
 }
 
+export interface ParsedGarlicOuterMessage {
+  length: number;
+  body: Buffer;
+  sessionTag?: Buffer;
+  ephemeralPublicKey?: Buffer;
+  encryptedPayload: Buffer;
+}
+
+export interface GarlicCloveMessage {
+  deliveryFlag: number;
+  message: I2NPMessage;
+}
+
 export interface I2NPMessage {
   type: I2NPMessageType;
   uniqueId: number;
@@ -112,10 +125,24 @@ export class I2NPMessages {
     // [sessionKey(32) | numTags(1) | sessionTag(8)] when ECIES flag set.
     const keyBuf = Buffer.from(key);
     const fromBuf = Buffer.from(fromHash);
+    if (keyBuf.length !== 32) {
+      throw new Error('DatabaseLookup key must be 32 bytes');
+    }
+    if (fromBuf.length !== 32) {
+      throw new Error('DatabaseLookup fromHash must be 32 bytes');
+    }
 
     const lookupBits = (lookupType & 0x03) << 2;
     const hasDelivery = typeof options.replyTunnelId === 'number';
-    const hasEcies = Boolean(options.eciesSessionKey && options.eciesSessionTag);
+    const hasEciesKey = options.eciesSessionKey !== undefined;
+    const hasEciesTag = options.eciesSessionTag !== undefined;
+    if (hasEciesKey !== hasEciesTag) {
+      throw new Error('DatabaseLookup ECIES options require both eciesSessionKey and eciesSessionTag');
+    }
+    if (hasDelivery && (!Number.isInteger(options.replyTunnelId) || (options.replyTunnelId ?? 0) <= 0)) {
+      throw new Error('DatabaseLookup replyTunnelId must be a non-zero integer');
+    }
+    const hasEcies = hasEciesKey && hasEciesTag;
     let flags = lookupBits;
     if (hasDelivery) flags |= 0x01;
     if (hasEcies) flags |= 0x10;
@@ -137,7 +164,11 @@ export class I2NPMessages {
     parts.push(sizeBuf);
 
     for (const peer of excludedPeers.slice(0, count)) {
-      parts.push(Buffer.from(peer));
+      const peerBuf = Buffer.from(peer);
+      if (peerBuf.length !== 32) {
+        throw new Error('DatabaseLookup excluded peers must be 32 bytes each');
+      }
+      parts.push(peerBuf);
     }
 
     if (hasEcies) {
@@ -280,6 +311,92 @@ export class I2NPMessages {
       expiration: Date.now() + 30000,
       payload
     };
+  }
+
+  static parseGarlicOuterMessage(payload: Buffer): ParsedGarlicOuterMessage | null {
+    if (payload.length < 4 + 8 + 16) return null;
+
+    const length = payload.readUInt32BE(0);
+    if (length <= 0 || payload.length < 4 + length) return null;
+
+    const body = payload.subarray(4, 4 + length);
+    return {
+      length,
+      body,
+      encryptedPayload: body
+    };
+  }
+
+  static parseGarlicCloveMessages(payload: Buffer): GarlicCloveMessage[] | null {
+    const cloves: GarlicCloveMessage[] = [];
+    let offset = 0;
+
+    while (offset < payload.length) {
+      if (offset + 3 > payload.length) return null;
+      const blockType = payload.readUInt8(offset);
+      const blockSize = payload.readUInt16BE(offset + 1);
+      offset += 3;
+      if (offset + blockSize > payload.length) return null;
+
+      const blockData = payload.subarray(offset, offset + blockSize);
+      offset += blockSize;
+
+      if (blockType === 0 || blockType === 254) {
+        continue;
+      }
+
+      if (blockType !== 3 || blockData.length < 1 + 1 + 4 + 4) {
+        continue;
+      }
+
+      const deliveryFlag = blockData.readUInt8(0);
+      if (deliveryFlag !== 0x00) {
+        continue;
+      }
+
+      const type = blockData.readUInt8(1);
+      const uniqueId = blockData.readUInt32BE(2);
+      const expiration = blockData.readUInt32BE(6) * 1000;
+      const clovePayload = blockData.subarray(10);
+      cloves.push({
+        deliveryFlag,
+        message: {
+          type,
+          uniqueId,
+          expiration,
+          payload: Buffer.from(clovePayload)
+        }
+      });
+    }
+
+    return cloves;
+  }
+
+  static createGarlicClovePayload(messages: I2NPMessage[]): Buffer {
+    const blocks: Buffer[] = [];
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const dateBlock = Buffer.alloc(1 + 2 + 4);
+    dateBlock.writeUInt8(0, 0);
+    dateBlock.writeUInt16BE(4, 1);
+    dateBlock.writeUInt32BE(nowSeconds >>> 0, 3);
+    blocks.push(dateBlock);
+
+    for (const message of messages) {
+      const expirationSeconds = Math.max(0, Math.floor(message.expiration / 1000)) >>> 0;
+      const cloveData = Buffer.alloc(1 + 1 + 4 + 4 + message.payload.length);
+      cloveData.writeUInt8(0x00, 0);
+      cloveData.writeUInt8(message.type, 1);
+      cloveData.writeUInt32BE(message.uniqueId >>> 0, 2);
+      cloveData.writeUInt32BE(expirationSeconds, 6);
+      message.payload.copy(cloveData, 10);
+
+      const header = Buffer.alloc(3);
+      header.writeUInt8(3, 0);
+      header.writeUInt16BE(cloveData.length, 1);
+      blocks.push(Buffer.concat([header, cloveData]));
+    }
+
+    return Buffer.concat(blocks);
   }
 }
 
