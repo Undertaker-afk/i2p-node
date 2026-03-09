@@ -38,6 +38,7 @@ export class NetworkDatabase extends EventEmitter {
   private isRunning = false;
   private exploratoryTimer: NodeJS.Timeout | null = null;
   private maintenanceTimer: NodeJS.Timeout | null = null;
+  private startedAt = 0;
 
   constructor(options: NetDbOptions = {}) {
     super();
@@ -100,6 +101,7 @@ export class NetworkDatabase extends EventEmitter {
     }
 
     // Start exploratory peer discovery
+    this.startedAt = Date.now();
     this.startExploratory();
     this.startMaintenance();
     
@@ -119,7 +121,7 @@ export class NetworkDatabase extends EventEmitter {
     this.isRunning = false;
     
     if (this.exploratoryTimer) {
-      clearInterval(this.exploratoryTimer);
+      clearTimeout(this.exploratoryTimer);
       this.exploratoryTimer = null;
     }
     
@@ -164,10 +166,18 @@ export class NetworkDatabase extends EventEmitter {
    * This periodically requests router infos from connected peers
    */
   private startExploratory(): void {
-    // Every 30 seconds, try to discover new peers
-    this.exploratoryTimer = setInterval(() => {
+    // Explore immediately on start, then use adaptive interval:
+    // - During bootstrap (first 60s): every 5 seconds
+    // - After bootstrap: every 30 seconds
+    this.exploreNewPeers();
+
+    const tick = () => {
       this.exploreNewPeers();
-    }, 30000);
+      const bootstrapping = (Date.now() - this.startedAt) < 60_000;
+      const nextMs = bootstrapping ? 5_000 : 30_000;
+      this.exploratoryTimer = setTimeout(tick, nextMs);
+    };
+    this.exploratoryTimer = setTimeout(tick, 5_000);
     
     logger.debug('Started exploratory peer discovery', undefined, 'NetDb');
   }
@@ -188,8 +198,9 @@ export class NetworkDatabase extends EventEmitter {
     // Generate a random hash to search for
     const randomHash = createHash('sha256').update(Math.random().toString()).digest();
     
-    // Find closest floodfills
-    const closestFloodfills = this.findClosestFloodfills(randomHash, 2);
+    // Find closest floodfills — try more during bootstrap for faster peer discovery
+    const bootstrapping = (Date.now() - this.startedAt) < 60_000;
+    const closestFloodfills = this.findClosestFloodfills(randomHash, bootstrapping ? 10 : 3);
     
     logger.debug(`Exploring peers near ${randomHash.toString('hex').slice(0, 16)}...`, {
       closestFloodfills: closestFloodfills.length
