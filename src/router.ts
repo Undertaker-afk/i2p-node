@@ -836,6 +836,33 @@ export class I2PRouter extends EventEmitter {
     this.emit('tunnelBuildReply', { sessionId, message });
   }
 
+
+  /**
+   * Pick a usable NTCP/NTCP2 endpoint from RouterInfo.
+   * Supports IPv4 and IPv6 literals (bracketed or plain) and requires s/i keys.
+   */
+  private getNtcpEndpoint(routerInfo: RouterInfo): { host: string; port: number } | null {
+    const addr = routerInfo.addresses.find((a) => {
+      const styleOk = a.transportStyle.toUpperCase().startsWith('NTCP');
+      const host = a.options.host;
+      const hasKeys = a.options.s && a.options.i && a.options.port;
+      return Boolean(styleOk && host && hasKeys);
+    });
+    if (!addr?.options.host || !addr.options.port) return null;
+
+    const rawHost = addr.options.host.trim();
+    const host = rawHost.startsWith('[') && rawHost.endsWith(']')
+      ? rawHost.slice(1, -1)
+      : rawHost;
+
+    const port = parseInt(addr.options.port, 10);
+    if (!host || Number.isNaN(port) || port <= 0 || port > 65535) {
+      return null;
+    }
+
+    return { host, port };
+  }
+
   private setupTunnelListeners(): void {
     if (!this.tunnelManager) return;
 
@@ -899,42 +926,26 @@ export class I2PRouter extends EventEmitter {
     );
     const wire = I2NPMessages.serializeMessage(msg);
 
-    // 1) Try NTCP2 (or NTCP v=2) if present with full keys (host/port/s/i).
+    // 1) Try NTCP2 if present with full keys (host/port/s/i).
     if (this.ntcp2) {
-      // Prefer IPv4 NTCP/NTCP2 addresses with full s/i options; skip IPv6/Ygg/Yggdrasil for now.
-      const ntcpAddr = floodfill.addresses.find((a) => {
-        const styleOk = a.transportStyle.toUpperCase().startsWith('NTCP');
-        const host = a.options.host;
-        const hasKeys = a.options.s && a.options.i && a.options.port;
-        if (!styleOk || !host || !hasKeys) return false;
-        // crude IPv4 detection: no ':' and not bracketed.
-        if (host.includes(':') || host.startsWith('[')) return false;
-        return true;
-      });
-
-      if (ntcpAddr) {
-        const host = ntcpAddr.options.host;
-        const portNum = parseInt(ntcpAddr.options.port, 10);
-        if (!host || !portNum || Number.isNaN(portNum)) {
-          logger.debug('Invalid NTCP2 address for floodfill', { host, port: ntcpAddr.options.port }, 'Router');
-        } else {
-          try {
-            await this.ntcp2.connect(host, portNum, floodfill);
-            const sessionId = `${host}:${portNum}`;
-            this.ntcp2.send(sessionId, wire);
-            this.stats.messagesSent++;
-            this.stats.bytesSent += wire.length;
-            return;
-          } catch (err) {
-            logger.warn(
-              'Exploratory NTCP2 lookup failed, will consider SSU2 fallback',
-              { error: (err as Error).message },
-              'Router'
-            );
-          }
+      const endpoint = this.getNtcpEndpoint(floodfill);
+      if (endpoint) {
+        try {
+          await this.ntcp2.connect(endpoint.host, endpoint.port, floodfill);
+          const sessionId = `${endpoint.host}:${endpoint.port}`;
+          this.ntcp2.send(sessionId, wire);
+          this.stats.messagesSent++;
+          this.stats.bytesSent += wire.length;
+          return;
+        } catch (err) {
+          logger.warn(
+            'Exploratory NTCP2 lookup failed, will consider SSU2 fallback',
+            { error: (err as Error).message },
+            'Router'
+          );
         }
       } else {
-        logger.debug('No IPv4 NTCP/NTCP2 address with s/i found for floodfill', undefined, 'Router');
+        logger.debug('No NTCP/NTCP2 address with s/i found for floodfill', undefined, 'Router');
       }
     }
 
@@ -1054,30 +1065,19 @@ export class I2PRouter extends EventEmitter {
     floodfill: RouterInfo,
     lookupType: 0 | 1 | 2 | 3
   ): Promise<void> {
-    // Prefer IPv4 NTCP2/NTCP with full keys; SSU2 fallback is disabled for now.
+    // Prefer NTCP2/NTCP with full keys.
     if (this.ntcp2) {
-      const ntcpAddr = floodfill.addresses.find((a) => {
-        const styleOk = a.transportStyle.toUpperCase().startsWith('NTCP');
-        const host = a.options.host;
-        const hasKeys = a.options.s && a.options.i && a.options.port;
-        if (!styleOk || !host || !hasKeys) return false;
-        if (host.includes(':') || host.startsWith('[')) return false;
-        return true;
-      });
-      if (ntcpAddr) {
-        const host = ntcpAddr.options.host!;
-        const portNum = parseInt(ntcpAddr.options.port, 10);
-        if (host && portNum && !Number.isNaN(portNum)) {
-          const fromHash = this.routerInfo!.getRouterHash();
-          const msg = I2NPMessages.createDatabaseLookup(targetHash, fromHash, lookupType, []);
-          const wire = I2NPMessages.serializeMessage(msg);
-          await this.ntcp2.connect(host, portNum, floodfill);
-          const sessionId = `${host}:${portNum}`;
-          this.ntcp2.send(sessionId, wire);
-          this.stats.messagesSent++;
-          this.stats.bytesSent += wire.length;
-          return;
-        }
+      const endpoint = this.getNtcpEndpoint(floodfill);
+      if (endpoint) {
+        const fromHash = this.routerInfo!.getRouterHash();
+        const msg = I2NPMessages.createDatabaseLookup(targetHash, fromHash, lookupType, []);
+        const wire = I2NPMessages.serializeMessage(msg);
+        await this.ntcp2.connect(endpoint.host, endpoint.port, floodfill);
+        const sessionId = `${endpoint.host}:${endpoint.port}`;
+        this.ntcp2.send(sessionId, wire);
+        this.stats.messagesSent++;
+        this.stats.bytesSent += wire.length;
+        return;
       }
     }
 
