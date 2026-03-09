@@ -240,6 +240,7 @@ export class RouterInfo {
   options: Record<string, string>;
   published: number;
   signature: Buffer | null;
+  private wireFormatData: Buffer | null;
 
   constructor(
     identity: RouterIdentity,
@@ -253,6 +254,15 @@ export class RouterInfo {
     this.options = options;
     this.published = published || Date.now();
     this.signature = signature;
+    this.wireFormatData = null;
+  }
+
+  setWireFormatData(data: Buffer): void {
+    this.wireFormatData = Buffer.from(data);
+  }
+
+  getWireFormatData(): Buffer | null {
+    return this.wireFormatData ? Buffer.from(this.wireFormatData) : null;
   }
 
   getRouterHash(): Buffer {

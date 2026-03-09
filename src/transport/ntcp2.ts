@@ -249,6 +249,21 @@ export class NTCP2Transport extends EventEmitter {
     return !!session && session.state === 'established' && !session.socket.destroyed;
   }
 
+  /** Find an established session by remote router hash. */
+  findSessionIdByRouterHash(routerHash: Uint8Array): string | null {
+    const target = Buffer.from(routerHash);
+    for (const [sessionId, session] of this.sessions) {
+      if (
+        session.state === 'established' &&
+        session.remoteRouterHash &&
+        Buffer.compare(session.remoteRouterHash, target) === 0
+      ) {
+        return sessionId;
+      }
+    }
+    return null;
+  }
+
   getBoundPort(): number | null {
     const addr = this.server?.address();
     return addr && typeof addr === 'object' ? addr.port : null;
@@ -589,6 +604,13 @@ export class NTCP2Transport extends EventEmitter {
     const blocks = decodeBlocks(plain);
     const riBlk = blocks.find((b) => b.type === 2);
     if (!riBlk) throw new Error('missing routerinfo block');
+
+    try {
+      const remoteRouterInfo = RouterInfo.deserialize(riBlk.data.subarray(1));
+      session.remoteRouterHash = Buffer.from(remoteRouterInfo.getRouterHash());
+    } catch {
+      // Keep session established even if RouterInfo parse fails.
+    }
 
     session.dp = deriveDataPhase(hs.ck, hs.h, false);
     session.state = 'established';

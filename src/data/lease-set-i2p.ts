@@ -148,7 +148,9 @@ export function parseLeaseSetLS1(data: Buffer, keyHash: Buffer): LeaseSet | null
     const signature = Uint8Array.from(data.subarray(offset, offset + signatureLen));
 
     const identity = identityFromRaw(identityBuf, keyHash);
-    return new LeaseSet(identity, encryptionKey, signingKey, leases, signature);
+    const leaseSet = new LeaseSet(identity, encryptionKey, signingKey, leases, signature);
+    leaseSet.setWireFormatData(data);
+    return leaseSet;
   } catch (e: any) {
     logger.debug(`LS1: parse error: ${e.message}`, undefined, 'LeaseSet');
     return null;

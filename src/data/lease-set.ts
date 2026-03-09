@@ -55,6 +55,7 @@ export class LeaseSet {
   signingKey: Uint8Array;
   leases: Lease[];
   signature: Uint8Array | null;
+  private wireFormatData: Buffer | null;
 
   constructor(
     destination: RouterIdentity,
@@ -68,6 +69,15 @@ export class LeaseSet {
     this.signingKey = signingKey;
     this.leases = leases;
     this.signature = signature;
+    this.wireFormatData = null;
+  }
+
+  setWireFormatData(data: Buffer): void {
+    this.wireFormatData = Buffer.from(data);
+  }
+
+  getWireFormatData(): Buffer | null {
+    return this.wireFormatData ? Buffer.from(this.wireFormatData) : null;
   }
 
   getHash(): Buffer {

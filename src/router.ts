@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { gunzipSync } from 'zlib';
+import { gunzipSync, gzipSync } from 'zlib';
 import { Crypto } from './crypto/index.js';
 import { RouterIdentity, RouterInfo, RouterAddress } from './data/router-info.js';
 import { LeaseSet } from './data/lease-set.js';
@@ -629,8 +629,14 @@ export class I2PRouter extends EventEmitter {
         const deliveryStatus = I2NPMessages.createDeliveryStatus(replyToken, Date.now());
         const dsWire = I2NPMessages.serializeMessage(deliveryStatus);
         if (replyTunnelId === 0) {
-          // Direct reply to the gateway peer
-          this.ntcp2.send(sessionId, dsWire);
+          // Direct reply to the gateway router from DatabaseStore fields.
+          const replySessionId = _replyGateway ? this.ntcp2.findSessionIdByRouterHash(_replyGateway) : null;
+          if (replySessionId) {
+            this.ntcp2.send(replySessionId, dsWire);
+          } else {
+            logger.debug('DatabaseStore: no established session to reply gateway; falling back to source session', undefined, 'Router');
+            this.ntcp2.send(sessionId, dsWire);
+          }
         } else {
           // Reply through tunnel — wrap in TunnelGateway
           // For now send directly to the session; full tunnel routing is TODO
@@ -756,14 +762,22 @@ export class I2PRouter extends EventEmitter {
     if (lookupType === 0 || lookupType === 2) {
       const ri = this.netDb.lookupRouterInfo(key);
       if (ri && this.ntcp2) {
-        const data = ri.serialize();
-        const ourHash = this.routerInfo!.getRouterHash();
-        const storeMsg = I2NPMessages.createDatabaseStore(key, data, 0, ourHash);
-        const wire = I2NPMessages.serializeMessage(storeMsg);
-        this.ntcp2.send(sessionId, wire);
-        this.stats.messagesSent++;
-        this.stats.bytesSent += wire.length;
-        replied = true;
+        const riWire = ri.getWireFormatData();
+        if (!riWire) {
+          logger.debug('DatabaseLookup: RouterInfo found but original I2P wire bytes unavailable; skipping DatabaseStore reply', undefined, 'Router');
+        } else {
+          const compressed = gzipSync(riWire);
+          const size = Buffer.alloc(2);
+          size.writeUInt16BE(compressed.length);
+          const data = Buffer.concat([size, compressed]);
+          const ourHash = this.routerInfo!.getRouterHash();
+          const storeMsg = I2NPMessages.createDatabaseStore(key, data, 0, ourHash);
+          const wire = I2NPMessages.serializeMessage(storeMsg);
+          this.ntcp2.send(sessionId, wire);
+          this.stats.messagesSent++;
+          this.stats.bytesSent += wire.length;
+          replied = true;
+        }
       }
     }
 
@@ -771,14 +785,18 @@ export class I2PRouter extends EventEmitter {
     if (!replied && (lookupType === 0 || lookupType === 1)) {
       const ls = this.netDb.lookupLeaseSet(key);
       if (ls && this.ntcp2) {
-        const lsData = ls.serialize();
-        const ourHash = this.routerInfo!.getRouterHash();
-        const storeMsg = I2NPMessages.createDatabaseStore(key, lsData, 0, ourHash, 'leaseSet');
-        const wire = I2NPMessages.serializeMessage(storeMsg);
-        this.ntcp2.send(sessionId, wire);
-        this.stats.messagesSent++;
-        this.stats.bytesSent += wire.length;
-        replied = true;
+        const lsData = ls.getWireFormatData();
+        if (!lsData) {
+          logger.debug('DatabaseLookup: LeaseSet found but original I2P wire bytes unavailable; skipping DatabaseStore reply', undefined, 'Router');
+        } else {
+          const ourHash = this.routerInfo!.getRouterHash();
+          const storeMsg = I2NPMessages.createDatabaseStore(key, lsData, 0, ourHash, 'leaseSet');
+          const wire = I2NPMessages.serializeMessage(storeMsg);
+          this.ntcp2.send(sessionId, wire);
+          this.stats.messagesSent++;
+          this.stats.bytesSent += wire.length;
+          replied = true;
+        }
       }
     }
 
