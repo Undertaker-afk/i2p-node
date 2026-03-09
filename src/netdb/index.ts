@@ -348,7 +348,8 @@ export class NetworkDatabase extends EventEmitter {
     
     if (this.routerInfos.has(key)) {
       const existing = this.routerInfos.get(key)!;
-      if (existing.timestamp >= routerInfo.published) {
+      const existingRi = existing.data as RouterInfo;
+      if (existingRi.published >= routerInfo.published) {
         return false;
       }
     }
@@ -361,7 +362,9 @@ export class NetworkDatabase extends EventEmitter {
       key: hash,
       data: routerInfo,
       type: 'routerInfo',
-      timestamp: routerInfo.published
+      // Keep insertion/update time for local expiration checks.
+      // Published timestamp can be old for valid reseed RouterInfos.
+      timestamp: Date.now()
     });
     
     if (this.isFloodfillRouter(routerInfo)) {
