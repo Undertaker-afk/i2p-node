@@ -433,6 +433,7 @@ export class NetworkDatabase extends EventEmitter {
   }
 
   findClosestFloodfills(targetKey: Buffer, count: number): RouterInfo[] {
+    const routingKey = this.createRoutingKey(targetKey);
     const floodfills: { hash: Buffer; distance: Buffer; routerInfo: RouterInfo }[] = [];
     
     for (const ffKey of this.floodfillPeers) {
@@ -440,7 +441,7 @@ export class NetworkDatabase extends EventEmitter {
       if (!entry) continue;
       
       const hash = Buffer.from(ffKey, 'hex');
-      const distance = this.xorDistance(hash, targetKey);
+      const distance = this.xorDistance(hash, routingKey);
       
       floodfills.push({
         hash,
@@ -511,8 +512,7 @@ export class NetworkDatabase extends EventEmitter {
   }
 
   private floodToClosestPeers(key: Buffer, data: RouterInfo | LeaseSet): void {
-    const routingKey = this.getRoutingKey(key);
-    const closestFloodfills = this.findClosestFloodfills(routingKey, 3);
+    const closestFloodfills = this.findClosestFloodfills(key, 3);
     
     for (const floodfill of closestFloodfills) {
       this.emit('flood', {
@@ -523,9 +523,15 @@ export class NetworkDatabase extends EventEmitter {
     }
   }
 
-  private getRoutingKey(key: Buffer): Buffer {
+  createRoutingKey(key: Buffer, nextDay = false): Buffer {
     const date = new Date();
-    const dateStr = date.toISOString().slice(0, 10).replace(/-/g, '');
+    if (nextDay) {
+      date.setUTCDate(date.getUTCDate() + 1);
+    }
+    const yyyy = date.getUTCFullYear().toString().padStart(4, '0');
+    const mm = (date.getUTCMonth() + 1).toString().padStart(2, '0');
+    const dd = date.getUTCDate().toString().padStart(2, '0');
+    const dateStr = `${yyyy}${mm}${dd}`;
     const dateBuf = Buffer.from(dateStr, 'ascii');
     
     return createHash('sha256').update(Buffer.concat([key, dateBuf])).digest();

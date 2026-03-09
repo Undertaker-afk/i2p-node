@@ -12,6 +12,13 @@ export enum I2NPMessageType {
   VARIABLE_TUNNEL_BUILD_REPLY = 23
 }
 
+
+export interface DatabaseLookupOptions {
+  replyTunnelId?: number;
+  eciesSessionKey?: Uint8Array;
+  eciesSessionTag?: Uint8Array;
+}
+
 export interface I2NPMessage {
   type: I2NPMessageType;
   uniqueId: number;
@@ -97,24 +104,57 @@ export class I2NPMessages {
     key: Uint8Array,
     fromHash: Uint8Array,
     lookupType: 0 | 1 | 2 | 3,
-    excludedPeers: Uint8Array[] = []
+    excludedPeers: Uint8Array[] = [],
+    options: DatabaseLookupOptions = {}
   ): I2NPMessage {
-    // DatabaseLookup payload (subset):
-    // key(32) | from(32) | flags(1) | reply_tunnelId?(4) | size(2) | excluded[size*32]
+    // DatabaseLookup payload:
+    // key(32) | from(32) | flags(1) | [reply_tunnelId(4)] | size(2) | excluded[size*32] |
+    // [sessionKey(32) | numTags(1) | sessionTag(8)] when ECIES flag set.
     const keyBuf = Buffer.from(key);
     const fromBuf = Buffer.from(fromHash);
 
-    // flags: bits 3-2 are lookup type; we don't use delivery/encryption/ECIES here.
     const lookupBits = (lookupType & 0x03) << 2;
+    const hasDelivery = typeof options.replyTunnelId === 'number';
+    const hasEcies = Boolean(options.eciesSessionKey && options.eciesSessionTag);
+    let flags = lookupBits;
+    if (hasDelivery) flags |= 0x01;
+    if (hasEcies) flags |= 0x10;
+
     const flagsBuf = Buffer.alloc(1);
-    flagsBuf.writeUInt8(lookupBits);
+    flagsBuf.writeUInt8(flags);
 
-    const sizeBuf = Buffer.alloc(2);
+    const parts: Buffer[] = [keyBuf, fromBuf, flagsBuf];
+
+    if (hasDelivery) {
+      const replyTunnelIdBuf = Buffer.alloc(4);
+      replyTunnelIdBuf.writeUInt32BE((options.replyTunnelId ?? 0) >>> 0);
+      parts.push(replyTunnelIdBuf);
+    }
+
     const count = Math.min(excludedPeers.length, 512);
+    const sizeBuf = Buffer.alloc(2);
     sizeBuf.writeUInt16BE(count);
+    parts.push(sizeBuf);
 
-    const excluded = excludedPeers.slice(0, count).map((p) => Buffer.from(p));
-    const payload = Buffer.concat([keyBuf, fromBuf, flagsBuf, sizeBuf, ...excluded]);
+    for (const peer of excludedPeers.slice(0, count)) {
+      parts.push(Buffer.from(peer));
+    }
+
+    if (hasEcies) {
+      const sessionKey = Buffer.from(options.eciesSessionKey!);
+      const sessionTag = Buffer.from(options.eciesSessionTag!);
+      if (sessionKey.length !== 32) {
+        throw new Error('DatabaseLookup eciesSessionKey must be 32 bytes');
+      }
+      if (sessionTag.length !== 8) {
+        throw new Error('DatabaseLookup eciesSessionTag must be 8 bytes');
+      }
+      const numTagsBuf = Buffer.alloc(1);
+      numTagsBuf.writeUInt8(1);
+      parts.push(sessionKey, numTagsBuf, sessionTag);
+    }
+
+    const payload = Buffer.concat(parts);
 
     return {
       type: I2NPMessageType.DATABASE_LOOKUP,

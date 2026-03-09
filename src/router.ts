@@ -37,6 +37,12 @@ export interface I2PRouterOptions {
   webUIPort?: number;
 }
 
+interface PendingLeaseSetRequest {
+  targetHash: Buffer;
+  excluded: Set<string>;
+  attempts: number;
+}
+
 export interface RouterStats {
   startTime: number;
   messagesSent: number;
@@ -71,6 +77,8 @@ export class I2PRouter extends EventEmitter {
   private identityEx: IdentityExBuildResult | null = null;
   private wireRouterInfo: Buffer | null = null;
   private ntcp2PublishedIV: Buffer | null = null;
+  private pendingLeaseSetRequests: Map<string, PendingLeaseSetRequest> = new Map();
+  private pendingEciesReplies: Map<string, Buffer> = new Map();
 
   constructor(options: I2PRouterOptions = {}) {
     super();
@@ -159,14 +167,14 @@ export class I2PRouter extends EventEmitter {
       });
     });
 
-    // Listen for LeaseSet lookup requests (type 0 = normal/any)
+    // Listen for LeaseSet lookup requests
     this.netDb.on('leaseSetLookup', ({ targetHash, floodfill }: { targetHash: Buffer; floodfill: RouterInfo }) => {
       logger.debug(
         `LeaseSet lookup for ${targetHash.toString('hex').slice(0, 16)}... via ${floodfill.getRouterHash().toString('hex').slice(0, 16)}...`,
         undefined,
         'Router'
       );
-      this.sendDatabaseLookup(targetHash, floodfill, 0).catch((err) => {
+      this.sendLeaseSetLookup(targetHash, floodfill).catch((err) => {
         logger.debug(`LeaseSet lookup failed: ${(err as Error).message}`, undefined, 'Router');
       });
     });
@@ -684,6 +692,7 @@ export class I2PRouter extends EventEmitter {
 
       if (leaseSet) {
         this.netDb.storeLeaseSet(leaseSet);
+        this.pendingLeaseSetRequests.delete(key.toString('hex'));
         logger.debug(
           `DatabaseStore (LS1) for ${key.toString('hex').slice(0, 16)}...`,
           undefined,
@@ -698,6 +707,7 @@ export class I2PRouter extends EventEmitter {
 
       if (leaseSet) {
         this.netDb.storeLeaseSet(leaseSet);
+        this.pendingLeaseSetRequests.delete(key.toString('hex'));
         logger.debug(
           `DatabaseStore (LS2) for ${key.toString('hex').slice(0, 16)}...`,
           undefined,
@@ -853,6 +863,13 @@ export class I2PRouter extends EventEmitter {
 
     // Delegate to NetDbRequests which handles retry logic and discovered router scheduling
     this.netDbRequests.handleSearchReply(key, routerHashes, isExploratory);
+
+    // LeaseSet iterative follow-up (i2pd-style): keep querying next closest floodfills.
+    if (this.pendingLeaseSetRequests.has(key.toString('hex'))) {
+      const req = this.pendingLeaseSetRequests.get(key.toString('hex'))!;
+      for (const h of routerHashes) req.excluded.add(h.toString('hex'));
+      this.tryNextLeaseSetLookup(key);
+    }
 
     this.emit('databaseSearchReply', { sessionId, message });
   }
@@ -1068,7 +1085,7 @@ export class I2PRouter extends EventEmitter {
 
     // Fire off lookups (LeaseSet type = 1)
     await Promise.all(
-      floodfills.map((ff) => this.sendDatabaseLookup(hash, ff, 1).catch(() => undefined))
+      floodfills.map((ff) => this.sendLeaseSetLookup(hash, ff).catch(() => undefined))
     );
 
     return new Promise<LeaseSet | null>((resolve) => {
@@ -1090,20 +1107,68 @@ export class I2PRouter extends EventEmitter {
     });
   }
 
+  private async sendLeaseSetLookup(targetHash: Buffer, floodfill: RouterInfo): Promise<void> {
+    const keyHex = targetHash.toString('hex');
+    let req = this.pendingLeaseSetRequests.get(keyHex);
+    if (!req) {
+      req = { targetHash: Buffer.from(targetHash), excluded: new Set(), attempts: 0 };
+      this.pendingLeaseSetRequests.set(keyHex, req);
+    }
+    req.excluded.add(floodfill.getRouterHash().toString('hex'));
+    req.attempts++;
+    await this.sendDatabaseLookup(targetHash, floodfill, 1, Array.from(req.excluded, (v) => Buffer.from(v, 'hex')));
+  }
+
+  private tryNextLeaseSetLookup(targetHash: Buffer): void {
+    const keyHex = targetHash.toString('hex');
+    const req = this.pendingLeaseSetRequests.get(keyHex);
+    if (!req) return;
+    if (this.netDb.lookupLeaseSet(targetHash)) {
+      this.pendingLeaseSetRequests.delete(keyHex);
+      return;
+    }
+    if (req.attempts >= 7) {
+      this.pendingLeaseSetRequests.delete(keyHex);
+      return;
+    }
+    const next = this.netDb
+      .findClosestFloodfills(targetHash, 7)
+      .find((ff) => !req.excluded.has(ff.getRouterHash().toString('hex')));
+    if (!next) {
+      this.pendingLeaseSetRequests.delete(keyHex);
+      return;
+    }
+    this.sendLeaseSetLookup(targetHash, next).catch(() => undefined);
+  }
+
   /**
    * Generic DatabaseLookup sender used for exploratory (routerInfo) and targeted (LeaseSet) lookups.
    */
   private async sendDatabaseLookup(
     targetHash: Buffer,
     floodfill: RouterInfo,
-    lookupType: 0 | 1 | 2 | 3
+    lookupType: 0 | 1 | 2 | 3,
+    excludedPeers: Buffer[] = []
   ): Promise<void> {
     // Prefer NTCP2/NTCP with full keys.
     if (this.ntcp2) {
       const endpoint = this.getNtcpEndpoint(floodfill);
       if (endpoint) {
         const fromHash = this.routerInfo!.getRouterHash();
-        const msg = I2NPMessages.createDatabaseLookup(targetHash, fromHash, lookupType, []);
+        const opts: {
+          replyTunnelId?: number;
+          eciesSessionKey?: Buffer;
+          eciesSessionTag?: Buffer;
+        } = {};
+
+        if (lookupType === 1) {
+          opts.replyTunnelId = 0;
+          opts.eciesSessionKey = Buffer.from(Crypto.randomBytes(32));
+          opts.eciesSessionTag = Buffer.from(Crypto.randomBytes(8));
+          this.pendingEciesReplies.set(opts.eciesSessionTag.toString('hex'), opts.eciesSessionKey);
+        }
+
+        const msg = I2NPMessages.createDatabaseLookup(targetHash, fromHash, lookupType, excludedPeers, opts);
         const wire = I2NPMessages.serializeMessage(msg);
         await this.ntcp2.connect(endpoint.host, endpoint.port, floodfill);
         const sessionId = `${endpoint.host}:${endpoint.port}`;
