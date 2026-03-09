@@ -39,6 +39,7 @@ export class NetworkDatabase extends EventEmitter {
   private exploratoryTimer: NodeJS.Timeout | null = null;
   private maintenanceTimer: NodeJS.Timeout | null = null;
   private startedAt = 0;
+  private lastLeaseSetLookupAt = 0;
 
   constructor(options: NetDbOptions = {}) {
     super();
@@ -214,14 +215,21 @@ export class NetworkDatabase extends EventEmitter {
       });
     }
 
-    // During bootstrap, also do normal (type 0) lookups for random hashes to discover
-    // LeaseSets.  Floodfills respond with whatever they have stored (RI or LS).
-    if (bootstrapping && this.leaseSets.size === 0) {
+    // Also do normal (type 0) lookups for random hashes to discover LeaseSets.
+    // Keep this aggressive during bootstrap, then back off to one lookup every
+    // 30s until we receive at least one LeaseSet.
+    const now = Date.now();
+    const shouldLookupLeaseSets =
+      this.leaseSets.size === 0 &&
+      (bootstrapping || (now - this.lastLeaseSetLookupAt) >= 30_000);
+
+    if (shouldLookupLeaseSets) {
       const lsHash = createHash('sha256').update(Date.now().toString() + Math.random().toString()).digest();
-      const lsFloodfills = this.findClosestFloodfills(lsHash, 3);
+      const lsFloodfills = this.findClosestFloodfills(lsHash, bootstrapping ? 3 : 1);
       for (const ff of lsFloodfills) {
         this.emit('leaseSetLookup', { targetHash: lsHash, floodfill: ff });
       }
+      this.lastLeaseSetLookupAt = now;
     }
   }
 
