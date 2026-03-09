@@ -149,6 +149,7 @@ export function parseLeaseSetLS1(data: Buffer, keyHash: Buffer): LeaseSet | null
 
     const identity = identityFromRaw(identityBuf, keyHash);
     const leaseSet = new LeaseSet(identity, encryptionKey, signingKey, leases, signature);
+    leaseSet.storeType = 1;
     leaseSet.setWireFormatData(data);
     return leaseSet;
   } catch (e: any) {
@@ -262,6 +263,7 @@ export function parseLeaseSetLS2(data: Buffer, keyHash: Buffer): LeaseSet | null
     const identity = identityFromRaw(identityBuf, keyHash);
     const signingKey = new Uint8Array(32); // dummy — not used in LS2 body
     const leaseSet = new LeaseSet(identity, encryptionKey, signingKey, leases, signature);
+    leaseSet.storeType = 3;
     leaseSet.setWireFormatData(data);
     return leaseSet;
   } catch (e: any) {
