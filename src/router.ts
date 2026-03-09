@@ -158,6 +158,18 @@ export class I2PRouter extends EventEmitter {
         logger.warn('Failed exploratory lookup send', { error: (err as Error).message }, 'Router');
       });
     });
+
+    // Listen for LeaseSet lookup requests (type 0 = normal/any)
+    this.netDb.on('leaseSetLookup', ({ targetHash, floodfill }: { targetHash: Buffer; floodfill: RouterInfo }) => {
+      logger.debug(
+        `LeaseSet lookup for ${targetHash.toString('hex').slice(0, 16)}... via ${floodfill.getRouterHash().toString('hex').slice(0, 16)}...`,
+        undefined,
+        'Router'
+      );
+      this.sendDatabaseLookup(targetHash, floodfill, 0).catch((err) => {
+        logger.debug(`LeaseSet lookup failed: ${(err as Error).message}`, undefined, 'Router');
+      });
+    });
   }
 
   /**

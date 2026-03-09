@@ -213,6 +213,16 @@ export class NetworkDatabase extends EventEmitter {
         floodfill: floodfill
       });
     }
+
+    // During bootstrap, also do normal (type 0) lookups for random hashes to discover
+    // LeaseSets.  Floodfills respond with whatever they have stored (RI or LS).
+    if (bootstrapping && this.leaseSets.size === 0) {
+      const lsHash = createHash('sha256').update(Date.now().toString() + Math.random().toString()).digest();
+      const lsFloodfills = this.findClosestFloodfills(lsHash, 3);
+      for (const ff of lsFloodfills) {
+        this.emit('leaseSetLookup', { targetHash: lsHash, floodfill: ff });
+      }
+    }
   }
 
   /**
