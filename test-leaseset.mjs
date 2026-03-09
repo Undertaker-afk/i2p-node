@@ -12,7 +12,7 @@ async function main() {
     ssu2Port: 12346,
     samPort: 7656,
     isFloodfill: true,
-    bandwidthClass: 'L',
+    bandwidthClass: 'X',
     netId: 2,
     dataDir: './test-i2p-data',
     logLevel: LogLevel.DEBUG,
