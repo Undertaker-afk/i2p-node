@@ -440,9 +440,36 @@ export class NetworkDatabase extends EventEmitter {
 
   private verifyLeaseSet(leaseSet: LeaseSet): boolean {
     if (!leaseSet.signature || leaseSet.signature.length === 0) {
+      logger.debug('LeaseSet rejected: missing signature', undefined, 'NetDb');
       return false;
     }
-    
+
+    // Validate lease count (per i2pd: MAX_NUM_LEASES = 16)
+    const leases = leaseSet.leases;
+    if (!leases || leases.length === 0) {
+      logger.debug('LeaseSet rejected: no leases', undefined, 'NetDb');
+      return false;
+    }
+    if (leases.length > 16) {
+      logger.debug(`LeaseSet rejected: too many leases (${leases.length})`, undefined, 'NetDb');
+      return false;
+    }
+
+    // Validate expiration: reject already-expired LeaseSets
+    const expiration = leaseSet.getExpiration();
+    const now = Date.now();
+    if (expiration <= now) {
+      logger.debug('LeaseSet rejected: already expired', undefined, 'NetDb');
+      return false;
+    }
+
+    // Reject LeaseSets with expiration too far in the future (> 11 minutes per i2pd)
+    const maxFuture = 11 * 60 * 1000; // 11 minutes
+    if (expiration > now + maxFuture) {
+      logger.debug('LeaseSet rejected: expiration too far in the future', undefined, 'NetDb');
+      return false;
+    }
+
     return true;
   }
 
