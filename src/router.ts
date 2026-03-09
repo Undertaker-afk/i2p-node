@@ -987,6 +987,7 @@ export class I2PRouter extends EventEmitter {
 
     const tunnelId = message.payload.readUInt32BE(0);
     const tunnel = this.tunnelManager.getTunnel(tunnelId);
+    // TODO: Extend this once multi-hop tunnel message decryption/routing is implemented.
     if (!tunnel || tunnel.type !== TunnelType.INBOUND || tunnel.hops.length !== 0) {
       return;
     }
@@ -1067,14 +1068,15 @@ export class I2PRouter extends EventEmitter {
     if (this.tunnelManager) {
       this.tunnelManager.cleanupExpiredTunnels();
 
-      // Ensure at least one inbound and one outbound tunnel exist.
+      // Keep a local zero-hop inbound reply tunnel available for LeaseSet lookups
+      // until full network tunnel build/reply routing is implemented.
       if (this.tunnelManager.getInboundTunnels().length === 0) {
         this.tunnelManager.buildTunnel(TunnelType.INBOUND, 0).catch(() => {
           /* ignore for now */
         });
       }
       if (this.tunnelManager.getOutboundTunnels().length === 0) {
-        this.tunnelManager.buildTunnel(TunnelType.OUTBOUND, 0).catch(() => {
+        this.tunnelManager.buildTunnel(TunnelType.OUTBOUND, 1).catch(() => {
           /* ignore for now */
         });
       }
@@ -1206,7 +1208,7 @@ export class I2PRouter extends EventEmitter {
 
     let req = this.pendingLeaseSetRequests.get(targetHex);
     if (!req) {
-      req = this.createPendingLeaseSetRequest(hash, timeoutMs);
+      req = this.createPendingLeaseSetRequest(hash, targetHex, timeoutMs);
       this.pendingLeaseSetRequests.set(targetHex, req);
     }
 
@@ -1236,7 +1238,7 @@ export class I2PRouter extends EventEmitter {
     const keyHex = targetHash.toString('hex');
     let req = this.pendingLeaseSetRequests.get(keyHex);
     if (!req) {
-      req = this.createPendingLeaseSetRequest(targetHash);
+      req = this.createPendingLeaseSetRequest(targetHash, keyHex);
       this.pendingLeaseSetRequests.set(keyHex, req);
     }
     const floodfillHash = floodfill.getRouterHash().toString('hex');
@@ -1258,7 +1260,7 @@ export class I2PRouter extends EventEmitter {
       this.clearPendingLeaseSetRequest(keyHex);
       return;
     }
-    if (Date.now() - req.createdAt >= LEASESET_REQUEST_TIMEOUT_MS || req.attempts >= MAX_LEASESET_FLOODFILLS_PER_REQUEST) {
+    if (this.shouldCleanupLeaseSetRequest(req)) {
       this.clearPendingLeaseSetRequest(keyHex);
       return;
     }
@@ -1311,7 +1313,7 @@ export class I2PRouter extends EventEmitter {
         if (lookupType === 1) {
           const replyTunnel = await this.ensureLeaseSetReplyTunnel();
           if (!replyTunnel) {
-            throw new Error('No inbound tunnel available for LeaseSet lookup reply');
+            throw new Error('Failed to create zero-hop inbound tunnel for LeaseSet lookup reply');
           }
           lookupFromHash = replyTunnel.gatewayHash;
           opts.replyTunnelId = replyTunnel.tunnelId;
@@ -1369,7 +1371,7 @@ export class I2PRouter extends EventEmitter {
     let wire = I2NPMessages.serializeMessage(replyMessage);
     if (replyTunnelId && replyTunnelId > 0) {
       const tunnelHeader = Buffer.alloc(4);
-      tunnelHeader.writeUInt32BE(replyTunnelId >>> 0);
+      tunnelHeader.writeUInt32BE(replyTunnelId);
       wire = I2NPMessages.serializeMessage({
         type: I2NPMessageType.TUNNEL_GATEWAY,
         uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
@@ -1384,7 +1386,11 @@ export class I2PRouter extends EventEmitter {
     this.stats.bytesSent += wire.length;
   }
 
-  private createPendingLeaseSetRequest(targetHash: Buffer, timeoutMs = LEASESET_REQUEST_TIMEOUT_MS): PendingLeaseSetRequest {
+  private createPendingLeaseSetRequest(
+    targetHash: Buffer,
+    targetHex: string,
+    timeoutMs = LEASESET_REQUEST_TIMEOUT_MS
+  ): PendingLeaseSetRequest {
     return {
       targetHash: Buffer.from(targetHash),
       excluded: new Set(),
@@ -1393,7 +1399,7 @@ export class I2PRouter extends EventEmitter {
       candidateFloodfills: [],
       eciesTags: new Set(),
       retryTimer: setTimeout(() => {
-        this.clearPendingLeaseSetRequest(targetHash.toString('hex'));
+        this.clearPendingLeaseSetRequest(targetHex);
       }, timeoutMs)
     };
   }
@@ -1420,9 +1426,8 @@ export class I2PRouter extends EventEmitter {
   }
 
   private cleanupPendingLeaseSetRequests(): void {
-    const now = Date.now();
     for (const [targetHex, req] of this.pendingLeaseSetRequests.entries()) {
-      if (now - req.createdAt >= LEASESET_REQUEST_TIMEOUT_MS || req.attempts >= MAX_LEASESET_FLOODFILLS_PER_REQUEST) {
+      if (this.shouldCleanupLeaseSetRequest(req)) {
         this.clearPendingLeaseSetRequest(targetHex);
       }
     }
@@ -1461,6 +1466,11 @@ export class I2PRouter extends EventEmitter {
       tunnelId: tunnel.id,
       gatewayHash: tunnel.gateway.getRouterHash()
     };
+  }
+
+  private shouldCleanupLeaseSetRequest(req: PendingLeaseSetRequest): boolean {
+    return Date.now() - req.createdAt >= LEASESET_REQUEST_TIMEOUT_MS
+      || req.attempts >= MAX_LEASESET_FLOODFILLS_PER_REQUEST;
   }
 
   async buildInboundTunnel(hops = 3): Promise<ReturnType<TunnelManager['buildTunnel']>> {

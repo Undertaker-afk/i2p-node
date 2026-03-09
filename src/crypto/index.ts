@@ -158,16 +158,16 @@ export class Crypto {
       throw new Error('Noise_N recipient static public key must be 32 bytes');
     }
 
-    const ephemeral = this.generateEphemeralKeyPair();
+    const ephemeralKeyPair = this.generateEphemeralKeyPair();
     const { h, key } = this.deriveNoiseNKey(
       Buffer.from(recipientStaticPublicKey),
-      Buffer.from(ephemeral.publicKey),
-      this.x25519DiffieHellman(ephemeral.privateKey, recipientStaticPublicKey)
+      Buffer.from(ephemeralKeyPair.publicKey),
+      this.x25519DiffieHellman(ephemeralKeyPair.privateKey, recipientStaticPublicKey)
     );
     const nonce = new Uint8Array(this.CHACHA_NONCE_LEN);
 
     return {
-      ephemeralPublicKey: Buffer.from(ephemeral.publicKey),
+      ephemeralPublicKey: Buffer.from(ephemeralKeyPair.publicKey),
       ciphertext: Buffer.from(this.encryptChaCha20Poly1305(key, nonce, plaintext, h))
     };
   }

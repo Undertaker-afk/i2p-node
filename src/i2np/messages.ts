@@ -32,6 +32,11 @@ export interface GarlicCloveMessage {
   message: I2NPMessage;
 }
 
+const GARLIC_CLOVE_TYPE_OFFSET = 1;
+const GARLIC_CLOVE_UNIQUE_ID_OFFSET = 2;
+const GARLIC_CLOVE_EXPIRATION_OFFSET = 6;
+const GARLIC_CLOVE_PAYLOAD_OFFSET = 10;
+
 export interface I2NPMessage {
   type: I2NPMessageType;
   uniqueId: number;
@@ -139,7 +144,10 @@ export class I2NPMessages {
     if (hasEciesKey !== hasEciesTag) {
       throw new Error('DatabaseLookup ECIES options require both eciesSessionKey and eciesSessionTag');
     }
-    if (hasDelivery && (!Number.isInteger(options.replyTunnelId) || (options.replyTunnelId ?? 0) <= 0)) {
+    if (
+      hasDelivery &&
+      (!Number.isInteger(options.replyTunnelId) || options.replyTunnelId! <= 0 || options.replyTunnelId! > 0xFFFFFFFF)
+    ) {
       throw new Error('DatabaseLookup replyTunnelId must be a non-zero integer');
     }
     const hasEcies = hasEciesKey && hasEciesTag;
@@ -354,10 +362,10 @@ export class I2NPMessages {
         continue;
       }
 
-      const type = blockData.readUInt8(1);
-      const uniqueId = blockData.readUInt32BE(2);
-      const expiration = blockData.readUInt32BE(6) * 1000;
-      const clovePayload = blockData.subarray(10);
+      const type = blockData.readUInt8(GARLIC_CLOVE_TYPE_OFFSET);
+      const uniqueId = blockData.readUInt32BE(GARLIC_CLOVE_UNIQUE_ID_OFFSET);
+      const expiration = blockData.readUInt32BE(GARLIC_CLOVE_EXPIRATION_OFFSET) * 1000;
+      const clovePayload = blockData.subarray(GARLIC_CLOVE_PAYLOAD_OFFSET);
       cloves.push({
         deliveryFlag,
         message: {
