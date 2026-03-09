@@ -2,6 +2,7 @@ import { Socket, createServer, Server } from 'net';
 import { EventEmitter } from 'events';
 import { Crypto } from '../crypto/index.js';
 import { RouterInfo } from '../data/router-info.js';
+import { parseI2PRouterInfo } from '../data/router-info-i2p.js';
 import { logger } from '../utils/logger.js';
 import { i2pBase64Decode } from '../i2p/base64.js';
 import { ed25519 } from '@noble/curves/ed25519';
@@ -605,11 +606,9 @@ export class NTCP2Transport extends EventEmitter {
     const riBlk = blocks.find((b) => b.type === 2);
     if (!riBlk) throw new Error('missing routerinfo block');
 
-    try {
-      const remoteRouterInfo = RouterInfo.deserialize(riBlk.data.subarray(1));
+    const remoteRouterInfo = parseI2PRouterInfo(riBlk.data.subarray(1));
+    if (remoteRouterInfo) {
       session.remoteRouterHash = Buffer.from(remoteRouterInfo.getRouterHash());
-    } catch {
-      // Keep session established even if RouterInfo parse fails.
     }
 
     session.dp = deriveDataPhase(hs.ck, hs.h, false);

@@ -767,16 +767,20 @@ export class I2PRouter extends EventEmitter {
           logger.debug('DatabaseLookup: RouterInfo found but original I2P wire bytes unavailable; skipping DatabaseStore reply', undefined, 'Router');
         } else {
           const compressed = gzipSync(riWire);
-          const size = Buffer.alloc(2);
-          size.writeUInt16BE(compressed.length);
-          const data = Buffer.concat([size, compressed]);
-          const ourHash = this.routerInfo!.getRouterHash();
-          const storeMsg = I2NPMessages.createDatabaseStore(key, data, 0, ourHash);
-          const wire = I2NPMessages.serializeMessage(storeMsg);
-          this.ntcp2.send(sessionId, wire);
-          this.stats.messagesSent++;
-          this.stats.bytesSent += wire.length;
-          replied = true;
+          if (compressed.length > 0xFFFF) {
+            logger.warn(`DatabaseLookup: compressed RouterInfo too large (${compressed.length} bytes)`, undefined, 'Router');
+          } else {
+            const size = Buffer.alloc(2);
+            size.writeUInt16BE(compressed.length);
+            const data = Buffer.concat([size, compressed]);
+            const ourHash = this.routerInfo!.getRouterHash();
+            const storeMsg = I2NPMessages.createDatabaseStore(key, data, 0, ourHash);
+            const wire = I2NPMessages.serializeMessage(storeMsg);
+            this.ntcp2.send(sessionId, wire);
+            this.stats.messagesSent++;
+            this.stats.bytesSent += wire.length;
+            replied = true;
+          }
         }
       }
     }
