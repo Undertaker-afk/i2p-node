@@ -66,21 +66,23 @@ export class TunnelManager extends EventEmitter {
   async buildTunnel(type: TunnelType, numHops = 3): Promise<Tunnel | null> {
     const tunnelId = this.nextTunnelId++;
     const replyMessageId = Math.floor(Math.random() * 0xFFFFFFFF);
-    
-    const hopRouters = this.selectHopRouters(numHops);
-    if (hopRouters.length < numHops) {
-      this.emit('error', { tunnelId, error: 'Not enough routers available' });
-      return null;
+    const hops: TunnelHop[] = [];
+    if (numHops > 0) {
+      const hopRouters = this.selectHopRouters(numHops);
+      if (hopRouters.length < numHops) {
+        this.emit('error', { tunnelId, error: 'Not enough routers available' });
+        return null;
+      }
+
+      hops.push(...hopRouters.map((router, index) => ({
+        routerHash: router.getRouterHash(),
+        routerInfo: router,
+        tunnelId: this.nextTunnelId++,
+        layerKey: Crypto.randomBytes(32),
+        ivKey: Crypto.randomBytes(32),
+        replyKey: index === 0 ? Crypto.randomBytes(32) : undefined
+      })));
     }
-    
-    const hops: TunnelHop[] = hopRouters.map((router, index) => ({
-      routerHash: router.getRouterHash(),
-      routerInfo: router,
-      tunnelId: this.nextTunnelId++,
-      layerKey: Crypto.randomBytes(32),
-      ivKey: Crypto.randomBytes(32),
-      replyKey: index === 0 ? Crypto.randomBytes(32) : undefined
-    }));
     
     const buildRequest: TunnelBuildRequest = {
       tunnelId,
@@ -99,16 +101,17 @@ export class TunnelManager extends EventEmitter {
       id: tunnelId,
       type,
       hops,
-      gateway: type === TunnelType.OUTBOUND ? this.localRouterInfo : hops[0].routerInfo,
-      endpoint: type === TunnelType.INBOUND ? this.localRouterInfo : hops[hops.length - 1].routerInfo,
+      gateway: type === TunnelType.OUTBOUND || hops.length === 0 ? this.localRouterInfo : hops[0].routerInfo,
+      endpoint: type === TunnelType.INBOUND || hops.length === 0 ? this.localRouterInfo : hops[hops.length - 1].routerInfo,
       created: Date.now(),
       expiration: Date.now() + 600000,
       messagesSent: 0,
       messagesReceived: 0
     };
-    
+
     // TODO: Implement full ECIES-X25519 build messages over the network.
     // For now we mark the tunnel as built locally without sending records.
+    // Zero-hop tunnels are fully local and intentionally skip network build records.
     // await this.sendTunnelBuildMessage(tunnel, hops);
     
     this.tunnels.set(tunnelId, tunnel);
@@ -268,11 +271,11 @@ export class TunnelManager extends EventEmitter {
     for (const tunnelId of tunnelIds) {
       const tunnel = this.getTunnel(tunnelId);
       if (!tunnel || tunnel.type !== TunnelType.INBOUND) continue;
-      
+
       const firstHop = tunnel.hops[0];
       leases.push(new Lease(
-        firstHop.routerHash,
-        firstHop.tunnelId,
+        firstHop?.routerHash ?? this.localRouterInfo.getRouterHash(),
+        firstHop?.tunnelId ?? tunnel.id,
         tunnel.expiration
       ));
     }
@@ -295,6 +298,9 @@ export class TunnelManager extends EventEmitter {
   encryptForTunnel(tunnelId: number, msg: Buffer): Buffer[] {
     const tunnel = this.tunnels.get(tunnelId);
     if (!tunnel) throw new Error(`Unknown tunnel ${tunnelId}`);
+    if (tunnel.hops.length === 0) {
+      return [Buffer.from(msg)];
+    }
     const firstHop = tunnel.hops[0];
     const wire = encryptTunnelMessage(firstHop.tunnelId, firstHop.layerKey, msg);
     return [wire];
