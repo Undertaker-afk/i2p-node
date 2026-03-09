@@ -1,2 +1,4 @@
 [mcp_servers.deepwiki]
+enabled = true
+enabled_tools = [*]
 url = "https://mcp.deepwiki.com/mcp"
