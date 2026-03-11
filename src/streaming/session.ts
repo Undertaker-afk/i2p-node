@@ -107,6 +107,7 @@ export class Stream extends EventEmitter {
       if (now - entry.timestamp > this.options.retransmitTimeoutMs) {
         const firstHop = this.outboundTunnel.hops[0];
         const tunnelMsg = this.tunnelManager.encryptForTunnel(this.outboundTunnel.id, entry.payload)[0]
+        this.inFlight.set(seq, { payload: entry.payload, timestamp: now });
         this.emit('sendRaw', tunnelMsg);
       }
     }
