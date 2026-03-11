@@ -44,3 +44,4 @@ coverage/
 tmp/
 temp/
 *.tmp
+test-i2p-data/netDb/
