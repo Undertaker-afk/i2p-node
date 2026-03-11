@@ -53,6 +53,7 @@ export interface I2NPMessage {
 }
 
 export class I2NPMessages {
+  private static readonly TUNNEL_BUILD_MSG_EXPIRATION_MS = 60000;
   /**
    * Parse an I2NP message with the NTCP2/SSU2 "short" header:
    * type(1) | msg_id(4) | short_expiration(4, seconds) | payload...
@@ -221,7 +222,7 @@ export class I2NPMessages {
     return {
       type: I2NPMessageType.TUNNEL_BUILD,
       uniqueId: crypto.randomBytes(4).readUInt32BE(0),
-      expiration: Date.now() + 60000,
+      expiration: Date.now() + I2NPMessages.TUNNEL_BUILD_MSG_EXPIRATION_MS,
       payload
     };
   }
@@ -233,7 +234,7 @@ export class I2NPMessages {
     return {
       type: I2NPMessageType.VARIABLE_TUNNEL_BUILD,
       uniqueId: uniqueId ?? crypto.randomBytes(4).readUInt32BE(0),
-      expiration: Date.now() + 60000,
+      expiration: Date.now() + I2NPMessages.TUNNEL_BUILD_MSG_EXPIRATION_MS,
       payload: Buffer.concat([recordCount, ...records])
     };
   }

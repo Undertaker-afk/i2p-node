@@ -56,6 +56,8 @@ export interface TunnelBuildRecord {
 }
 
 export class TunnelManager extends EventEmitter {
+  private static readonly TUNNEL_BUILD_EXPIRATION_S = 600;
+
   private tunnels: Map<number, Tunnel> = new Map();
   private pendingTunnels: Map<number, Tunnel> = new Map();
   private pendingBuilds: Map<number, TunnelBuildRequest> = new Map();
@@ -245,7 +247,7 @@ export class TunnelManager extends EventEmitter {
 
     const requestTime = Math.floor(Date.now() / 60000) >>> 0;
     clear.writeUInt32BE(requestTime, pos); pos += 4;
-    clear.writeUInt32BE(600, pos); pos += 4;
+    clear.writeUInt32BE(TunnelManager.TUNNEL_BUILD_EXPIRATION_S, pos); pos += 4;
 
     // sendMsgID: use tunnel id as a stable local correlation id
     clear.writeUInt32BE(tunnel.id >>> 0, pos); pos += 4;
