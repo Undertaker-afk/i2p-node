@@ -853,7 +853,7 @@ export class I2PRouter extends EventEmitter {
             const ourHash = this.routerInfo!.getRouterHash();
             const storeMsg = I2NPMessages.createDatabaseStore(key, data, 0, ourHash);
             this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag);
-            replied = true;
+            this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag).catch((err) => { logger.debug(`sendDatabaseLookupReply failed: ${(err as Error).message}`, undefined, 'Router'); });
           }
         }
       }
@@ -870,7 +870,7 @@ export class I2PRouter extends EventEmitter {
           const ourHash = this.routerInfo!.getRouterHash();
           const storeMsg = I2NPMessages.createDatabaseStore(key, lsData, 0, ourHash, ls.storeType);
           this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag);
-          replied = true;
+          this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag).catch((err) => { logger.debug(`sendDatabaseLookupReply failed: ${(err as Error).message}`, undefined, 'Router'); });
         }
       }
     }
@@ -885,7 +885,7 @@ export class I2PRouter extends EventEmitter {
       const ourHash = this.routerInfo!.getRouterHash();
       const searchReply = I2NPMessages.createDatabaseSearchReply(key, routerHashes, ourHash);
       this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, searchReply, eciesSessionKey, eciesSessionTag);
-    }
+      this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, searchReply, eciesSessionKey, eciesSessionTag).catch((err) => { logger.debug(`sendDatabaseLookupReply failed: ${(err as Error).message}`, undefined, 'Router'); });
 
     this.emit('databaseLookup', { sessionId, message });
   }

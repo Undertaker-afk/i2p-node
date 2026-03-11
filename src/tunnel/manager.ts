@@ -165,7 +165,7 @@ export class TunnelManager extends EventEmitter {
   }
 
   private async sendTunnelBuildMessage(tunnel: Tunnel, hops: TunnelHop[]): Promise<void> {
-    const numRecords = Math.max(4, Math.min(8, hops.length));
+    const numRecords = Math.max(4, Math.max(8, hops.length));
     const records: Buffer[] = Array.from({ length: numRecords }, () => Buffer.from(Crypto.randomBytes(528)));
     const order = this.shuffleIndices(numRecords).slice(0, hops.length);
 
