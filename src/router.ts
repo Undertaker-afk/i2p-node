@@ -8,6 +8,7 @@ import { parseI2PRouterInfo } from './data/router-info-i2p.js';
 import { I2NPMessages, I2NPMessageType } from './i2np/messages.js';
 import { NetworkDatabase } from './netdb/index.js';
 import { TunnelManager, TunnelType } from './tunnel/manager.js';
+import { decryptTunnelMessage } from './tunnel/message.js';
 import { PeerProfileManager } from './peer/profiles.js';
 import { NTCP2Transport } from './transport/ntcp2.js';
 import { SSU2Transport } from './transport/ssu2.js';
@@ -679,12 +680,12 @@ export class I2PRouter extends EventEmitter {
             this.ntcp2.send(sessionId, dsWire);
           }
         } else {
-          // Reply through tunnel — wrap in TunnelGateway
-          // For now send directly to the session; full tunnel routing is TODO
-          this.ntcp2.send(sessionId, dsWire);
+          void this.sendWireViaReplyTunnel(_replyGateway, replyTunnelId, dsWire, sessionId);
         }
-        this.stats.messagesSent++;
-        this.stats.bytesSent += dsWire.length;
+        if (replyTunnelId === 0) {
+          this.stats.messagesSent++;
+          this.stats.bytesSent += dsWire.length;
+        }
       }
     }
 
@@ -989,16 +990,44 @@ export class I2PRouter extends EventEmitter {
 
     const tunnelId = message.payload.readUInt32BE(0);
     const tunnel = this.tunnelManager.getTunnel(tunnelId);
-    // TODO: Extend this once multi-hop tunnel message decryption/routing is implemented.
-    if (!tunnel || tunnel.type !== TunnelType.INBOUND || tunnel.hops.length !== 0) {
+    if (!tunnel || tunnel.type !== TunnelType.INBOUND) {
+      return;
+    }
+
+    const tunnelPayload = message.payload.subarray(4);
+
+    // Zero-hop inbound tunnels carry a direct inner I2NP message.
+    if (tunnel.hops.length === 0) {
+      try {
+        const inner = I2NPMessages.parseMessage(tunnelPayload);
+        this.handleI2NPMessage(sessionId, inner);
+      } catch (err) {
+        logger.debug(`Failed to unwrap zero-hop tunnel message: ${(err as Error).message}`, undefined, 'Router');
+      }
+      return;
+    }
+
+    // Multi-hop inbound tunnels carry encrypted 1028-byte tunnel messages.
+    const candidate = message.payload.length === 1028 ? message.payload : tunnelPayload;
+    let fragment: Buffer | null = null;
+    for (const hop of tunnel.hops) {
+      const unwrapped = decryptTunnelMessage(hop.tunnelId, hop.layerKey, candidate);
+      if (unwrapped) {
+        fragment = Buffer.from(unwrapped.fragment);
+        break;
+      }
+    }
+
+    if (!fragment) {
+      logger.debug('Failed to decrypt multi-hop tunnel message', undefined, 'Router');
       return;
     }
 
     try {
-      const inner = I2NPMessages.parseMessage(message.payload.subarray(4));
+      const inner = I2NPMessages.parseMessage(fragment);
       this.handleI2NPMessage(sessionId, inner);
     } catch (err) {
-      logger.debug(`Failed to unwrap zero-hop tunnel message: ${(err as Error).message}`, undefined, 'Router');
+      logger.debug(`Failed to parse multi-hop tunnel fragment: ${(err as Error).message}`, undefined, 'Router');
     }
   }
 
@@ -1363,6 +1392,62 @@ export class I2PRouter extends EventEmitter {
 
     // SSU2 path intentionally disabled while transport is MVP-only and not
     // interoperable with stock routers yet.
+  }
+
+
+  private async sendWireViaReplyTunnel(
+    replyGatewayHash: Buffer | null,
+    replyTunnelId: number,
+    wire: Buffer,
+    fallbackSessionId: string
+  ): Promise<void> {
+    if (!this.ntcp2 || !this.tunnelManager || !replyGatewayHash) {
+      if (this.ntcp2) this.ntcp2.send(fallbackSessionId, wire);
+      return;
+    }
+
+    const tunnelHeader = Buffer.alloc(4);
+    tunnelHeader.writeUInt32BE(replyTunnelId >>> 0, 0);
+    const gatewayMsgWire = I2NPMessages.serializeMessage({
+      type: I2NPMessageType.TUNNEL_GATEWAY,
+      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      expiration: Date.now() + 30000,
+      payload: Buffer.concat([tunnelHeader, wire])
+    });
+
+    const outbound = this.tunnelManager.getOutboundTunnels()[0];
+    if (!outbound) {
+      this.ntcp2.send(fallbackSessionId, wire);
+      return;
+    }
+
+    if (outbound.hops.length === 0) {
+      const gatewaySessionId = this.ntcp2.findSessionIdByRouterHash(replyGatewayHash);
+      this.ntcp2.send(gatewaySessionId ?? fallbackSessionId, gatewayMsgWire);
+      this.stats.messagesSent++;
+      this.stats.bytesSent += gatewayMsgWire.length;
+      return;
+    }
+
+    const firstHop = outbound.hops[0].routerInfo;
+    const endpoint = this.getNtcpEndpoint(firstHop);
+    if (!endpoint) {
+      this.ntcp2.send(fallbackSessionId, wire);
+      return;
+    }
+
+    await this.ntcp2.connect(endpoint.host, endpoint.port, firstHop);
+    const firstHopSession = `${endpoint.host}:${endpoint.port}`;
+    const encrypted = this.tunnelManager.encryptForTunnel(outbound.id, gatewayMsgWire)[0];
+    const outer = I2NPMessages.serializeMessage({
+      type: I2NPMessageType.TUNNEL_DATA,
+      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      expiration: Date.now() + 30000,
+      payload: encrypted
+    });
+    this.ntcp2.send(firstHopSession, outer);
+    this.stats.messagesSent++;
+    this.stats.bytesSent += outer.length;
   }
 
   private sendDatabaseLookupReply(
