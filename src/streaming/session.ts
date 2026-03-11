@@ -60,8 +60,7 @@ export class Stream extends EventEmitter {
     hdr.writeUInt8(0x00, 8); // flags: data
     const frame = Buffer.concat([hdr, data]);
 
-    const firstHop = this.outboundTunnel.hops[0];
-    const tunnelMsg = encryptTunnelMessage(firstHop.tunnelId, firstHop.layerKey, frame);
+    const tunnelMsg = this.tunnelManager.encryptForTunnel(this.outboundTunnel.id, frame)[0];
 
     this.inFlight.set(seq, { payload: frame, timestamp: Date.now() });
     this.emit('sendRaw', tunnelMsg);
@@ -97,8 +96,7 @@ export class Stream extends EventEmitter {
     hdr.writeUInt32BE(this.id >>> 0, 0);
     hdr.writeUInt32BE(seq >>> 0, 4);
     hdr.writeUInt8(0x80, 8); // ACK flag
-    const firstHop = this.outboundTunnel.hops[0];
-    const ackMsg = encryptTunnelMessage(firstHop.tunnelId, firstHop.layerKey, hdr);
+    const ackMsg = this.tunnelManager.encryptForTunnel(this.outboundTunnel.id, hdr)[0];
     this.emit('sendRaw', ackMsg);
   }
 
@@ -108,8 +106,7 @@ export class Stream extends EventEmitter {
     for (const [seq, entry] of this.inFlight.entries()) {
       if (now - entry.timestamp > this.options.retransmitTimeoutMs) {
         const firstHop = this.outboundTunnel.hops[0];
-        const tunnelMsg = encryptTunnelMessage(firstHop.tunnelId, firstHop.layerKey, entry.payload);
-        this.inFlight.set(seq, { payload: entry.payload, timestamp: now });
+        const tunnelMsg = this.tunnelManager.encryptForTunnel(this.outboundTunnel.id, entry.payload)[0]
         this.emit('sendRaw', tunnelMsg);
       }
     }

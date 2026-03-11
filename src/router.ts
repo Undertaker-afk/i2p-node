@@ -44,10 +44,11 @@ interface PendingLeaseSetRequest {
   excluded: Set<string>;
   attempts: number;
   createdAt: number;
+  expiresAt: number;
   candidateFloodfills: string[];
   eciesTags: Set<string>;
   retryTimer: NodeJS.Timeout | null;  // For retry delay (2.5s)
-  cleanupTimer: NodeJS.Timeout | null;  // For request timeout cleanup (15s)
+  cleanupTimer: NodeJS.Timeout | null;  // For request timeout cleanup
 }
 
 interface PendingEciesReply {
@@ -1472,14 +1473,14 @@ export class I2PRouter extends EventEmitter {
     this.stats.bytesSent += outer.length;
   }
 
-  private sendDatabaseLookupReply(
+  private async sendDatabaseLookupReply(
     sessionId: string,
     replyGatewayHash: Buffer,
     replyTunnelId: number | undefined,
     innerMessage: ReturnType<typeof I2NPMessages.createDatabaseStore> | ReturnType<typeof I2NPMessages.createDatabaseSearchReply>,
     eciesSessionKey?: Buffer,
     eciesSessionTag?: Buffer
-  ): void {
+  ): Promise<void> {
     if (!this.ntcp2) return;
 
     let replyMessage = innerMessage;
@@ -1511,8 +1512,38 @@ export class I2PRouter extends EventEmitter {
       });
     }
 
+    let targetSessionId: string | null = null;
     const gatewaySessionId = this.ntcp2.findSessionIdByRouterHash(replyGatewayHash);
-    this.ntcp2.send(gatewaySessionId ?? sessionId, wire);
+    if (gatewaySessionId) {
+      targetSessionId = gatewaySessionId;
+    } else if (replyTunnelId && replyTunnelId > 0) {
+      const routerInfo = this.netDb.lookupRouterInfo(replyGatewayHash);
+      if (!routerInfo) {
+        logger.warn(`Cannot reply via tunnel to unknown gateway ${replyGatewayHash.toString('hex').slice(0,16)}...`);
+        return;
+      }
+      const endpoint = this.getNtcpEndpoint(routerInfo);
+      if (!endpoint) {
+        logger.warn(`No NTCP endpoint for reply gateway ${replyGatewayHash.toString('hex').slice(0,16)}...`);
+        return;
+      }
+      await this.ntcp2.connect(endpoint.host, endpoint.port, routerInfo);
+      const newSessionId = this.ntcp2.findSessionIdByRouterHash(replyGatewayHash);
+      if (!newSessionId) {
+        logger.warn(`Failed to establish session to reply gateway ${replyGatewayHash.toString('hex').slice(0,16)}...`);
+        return;
+      }
+      targetSessionId = newSessionId;
+    } else {
+      targetSessionId = sessionId;
+    }
+
+    if (!targetSessionId) {
+      logger.warn('No valid session ID for DatabaseLookup reply');
+      return;
+    }
+
+    this.ntcp2.send(targetSessionId, wire);
     this.stats.messagesSent++;
     this.stats.bytesSent += wire.length;
   }
@@ -1527,6 +1558,7 @@ export class I2PRouter extends EventEmitter {
       excluded: new Set(),
       attempts: 0,
       createdAt: Date.now(),
+      expiresAt: Date.now() + timeoutMs,
       candidateFloodfills: [],
       eciesTags: new Set(),
       retryTimer: null,
@@ -1606,7 +1638,7 @@ export class I2PRouter extends EventEmitter {
     };
   }
 
-  private shouldCleanupLeaseSetRequest(req: PendingLeaseSetRequest): boolean {
+  private shouldCleanu>= req.expiresAt boolean {
     return Date.now() - req.createdAt >= LEASESET_REQUEST_TIMEOUT_MS
       || req.attempts >= MAX_LEASESET_FLOODFILLS_PER_REQUEST;
   }

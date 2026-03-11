@@ -464,11 +464,11 @@ export class TunnelManager extends EventEmitter {
   encryptForTunnel(tunnelId: number, msg: Buffer): Buffer[] {
     const tunnel = this.tunnels.get(tunnelId);
     if (!tunnel) throw new Error(`Unknown tunnel ${tunnelId}`);
-    if (tunnel.hops.length === 0) {
-      return [Buffer.from(msg)];
+    let wire = Buffer.from(msg);
+    for (let i = tunnel.hops.length - 1; i >= 0; i--) {
+      const hop = tunnel.hops[i];
+      wire = encryptTunnelMessage(hop.tunnelId, hop.layerKey, wire);
     }
-    const firstHop = tunnel.hops[0];
-    const wire = encryptTunnelMessage(firstHop.tunnelId, firstHop.layerKey, msg);
     return [wire];
   }
 }
