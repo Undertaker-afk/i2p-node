@@ -167,7 +167,7 @@ export class I2NPMessages {
 
     if (hasDelivery) {
       const replyTunnelIdBuf = Buffer.alloc(4);
-      replyTunnelIdBuf.writeUInt32BE((options.replyTunnelId ?? 0) >>> 0);
+      replyTunnelIdBuf.writeUInt32BE(options.replyTunnelId! >>> 0);
       parts.push(replyTunnelIdBuf);
     }
 

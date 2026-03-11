@@ -365,6 +365,11 @@ export class I2PRouter extends EventEmitter {
 
     this.running = false;
 
+    for (const [targetHex] of this.pendingLeaseSetRequests) {
+      this.clearPendingLeaseSetRequest(targetHex);
+    }
+    this.pendingEciesReplies.clear();
+
     if (this.maintenanceInterval) {
       clearInterval(this.maintenanceInterval);
       this.maintenanceInterval = null;
@@ -997,7 +1002,11 @@ export class I2PRouter extends EventEmitter {
       return;
     }
 
-    const tunnelPayload = message.payload.subarray(4);
+    const innerOffset = message.type === I2NPMessageType.TUNNEL_GATEWAY ? 6 : 4;
+    if (message.payload.length < innerOffset + 9) {
+      return;
+    }
+    const tunnelPayload = message.payload.subarray(innerOffset);
 
     // Zero-hop inbound tunnels carry a direct inner I2NP message.
     if (tunnel.hops.length === 0) {
@@ -1411,11 +1420,13 @@ export class I2PRouter extends EventEmitter {
 
     const tunnelHeader = Buffer.alloc(4);
     tunnelHeader.writeUInt32BE(replyTunnelId >>> 0, 0);
+    const tunnelLen = Buffer.alloc(2);
+    tunnelLen.writeUInt16BE(wire.length >>> 0, 0);
     const gatewayMsgWire = I2NPMessages.serializeMessage({
       type: I2NPMessageType.TUNNEL_GATEWAY,
       uniqueId: crypto.randomBytes(4).readUInt32BE(0),
       expiration: Date.now() + 30000,
-      payload: Buffer.concat([tunnelHeader, wire])
+      payload: Buffer.concat([tunnelHeader, tunnelLen, wire])
     });
 
     const outbound = this.tunnelManager.getOutboundTunnels()[0];
@@ -1482,11 +1493,13 @@ export class I2PRouter extends EventEmitter {
     if (replyTunnelId && replyTunnelId > 0) {
       const tunnelHeader = Buffer.alloc(4);
       tunnelHeader.writeUInt32BE(replyTunnelId);
+      const tunnelLen = Buffer.alloc(2);
+      tunnelLen.writeUInt16BE(wire.length >>> 0);
       wire = I2NPMessages.serializeMessage({
         type: I2NPMessageType.TUNNEL_GATEWAY,
         uniqueId: crypto.randomBytes(4).readUInt32BE(0),
         expiration: Date.now() + 30000,
-        payload: Buffer.concat([tunnelHeader, wire])
+        payload: Buffer.concat([tunnelHeader, tunnelLen, wire])
       });
     }
 
@@ -1519,6 +1532,7 @@ export class I2PRouter extends EventEmitter {
     if (!req) return;
     if (req.retryTimer) {
       clearTimeout(req.retryTimer);
+      req.retryTimer = null;
     }
     for (const tagHex of req.eciesTags) {
       this.clearPendingEciesReply(tagHex);
@@ -1528,9 +1542,10 @@ export class I2PRouter extends EventEmitter {
 
   private scheduleLeaseSetRetry(req: PendingLeaseSetRequest): void {
     if (req.retryTimer) {
-      clearTimeout(req.retryTimer);
+      return;
     }
     req.retryTimer = setTimeout(() => {
+      req.retryTimer = null;
       this.tryNextLeaseSetLookup(req.targetHash);
     }, LEASESET_RETRY_DELAY_MS);
   }

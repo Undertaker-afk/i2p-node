@@ -162,11 +162,14 @@ export class Crypto {
     if (remoteStaticPublicKey.length !== 32) {
       throw new Error('Noise_N remote static public key must be 32 bytes');
     }
-    const protocolHash = Buffer.from(this.sha256(this.NOISE_N_PROTOCOL_NAME));
-    const h = Buffer.from(this.sha256(Buffer.concat([protocolHash, Buffer.from(remoteStaticPublicKey)])));
+    const hPadded = Buffer.alloc(32);
+    this.NOISE_N_PROTOCOL_NAME.copy(hPadded);
+    const ck = Buffer.from(hPadded);
+    const hInitial = Buffer.from(this.sha256(hPadded));
+    const h = Buffer.from(this.sha256(Buffer.concat([hInitial, Buffer.from(remoteStaticPublicKey)])));
     return {
       h,
-      ck: Buffer.from(protocolHash),
+      ck,
       key: Buffer.alloc(32)
     };
   }
