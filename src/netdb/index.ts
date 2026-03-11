@@ -33,6 +33,7 @@ export class NetworkDatabase extends EventEmitter {
   private routerInfos: Map<string, NetDbEntry> = new Map();
   private leaseSets: Map<string, NetDbEntry> = new Map();
   private floodfillPeers: Set<string> = new Set();
+  private routingKeyCache: Map<string, { routingKey: Buffer; dateStr: string }> = new Map();
   private options: NetDbOptions;
   private reseeder: Reseeder;
   private isRunning = false;
@@ -433,18 +434,19 @@ export class NetworkDatabase extends EventEmitter {
   }
 
   findClosestFloodfills(targetKey: Buffer, count: number): RouterInfo[] {
-    const routingKey = this.createRoutingKey(targetKey);
+    const targetRoutingKey = this.getRoutingKey(targetKey);
     const floodfills: { hash: Buffer; distance: Buffer; routerInfo: RouterInfo }[] = [];
     
     for (const ffKey of this.floodfillPeers) {
       const entry = this.routerInfos.get(ffKey);
       if (!entry) continue;
       
-      const hash = Buffer.from(ffKey, 'hex');
-      const distance = this.xorDistance(hash, routingKey);
+      const identHash = Buffer.from(ffKey, 'hex');
+      const ffRoutingKey = this.getRoutingKey(identHash);
+      const distance = this.xorDistance(ffRoutingKey, targetRoutingKey);
       
       floodfills.push({
-        hash,
+        hash: identHash,
         distance,
         routerInfo: entry.data as RouterInfo
       });
@@ -535,6 +537,24 @@ export class NetworkDatabase extends EventEmitter {
     const dateBuf = Buffer.from(dateStr, 'ascii');
     
     return createHash('sha256').update(Buffer.concat([key, dateBuf])).digest();
+  }
+
+  private getRoutingKey(identHash: Buffer): Buffer {
+    const key = identHash.toString('hex');
+    const now = new Date();
+    const yyyy = now.getUTCFullYear().toString().padStart(4, '0');
+    const mm = (now.getUTCMonth() + 1).toString().padStart(2, '0');
+    const dd = now.getUTCDate().toString().padStart(2, '0');
+    const dateStr = `${yyyy}${mm}${dd}`;
+
+    const cached = this.routingKeyCache.get(key);
+    if (cached && cached.dateStr === dateStr) {
+      return cached.routingKey;
+    }
+
+    const routingKey = this.createRoutingKey(identHash);
+    this.routingKeyCache.set(key, { routingKey, dateStr });
+    return routingKey;
   }
 
   private cleanupRouterInfos(): void {

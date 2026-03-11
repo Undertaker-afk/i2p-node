@@ -8,8 +8,10 @@ export enum I2NPMessageType {
   TUNNEL_GATEWAY = 19,
   TUNNEL_BUILD = 20,
   TUNNEL_BUILD_REPLY = 21,
-  VARIABLE_TUNNEL_BUILD = 22,
-  VARIABLE_TUNNEL_BUILD_REPLY = 23
+  VARIABLE_TUNNEL_BUILD = 23,
+  VARIABLE_TUNNEL_BUILD_REPLY = 24,
+  SHORT_TUNNEL_BUILD = 25,
+  SHORT_TUNNEL_BUILD_REPLY = 26
 }
 
 
@@ -116,6 +118,37 @@ export class I2NPMessages {
       expiration: Date.now() + 60000,
       payload
     };
+  }
+
+  static createVariableTunnelBuild(
+    records: Buffer[]
+  ): I2NPMessage {
+    const recordCount = Buffer.alloc(1);
+    recordCount.writeUInt8(records.length);
+
+    const payload = Buffer.concat([
+      recordCount,
+      ...records
+    ]);
+
+    return {
+      type: I2NPMessageType.VARIABLE_TUNNEL_BUILD,
+      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      expiration: Date.now() + 60000,
+      payload
+    };
+  }
+
+  static parseVariableTunnelBuildReply(payload: Buffer): Buffer[] | null {
+    if (payload.length < 1) return null;
+    const numRecords = payload.readUInt8(0);
+    if (payload.length < 1 + numRecords * 528) return null;
+
+    const records: Buffer[] = [];
+    for (let i = 0; i < numRecords; i++) {
+      records.push(payload.subarray(1 + i * 528, 1 + (i + 1) * 528));
+    }
+    return records;
   }
 
   static createDatabaseLookup(
@@ -353,28 +386,42 @@ export class I2NPMessages {
         continue;
       }
 
-      if (blockType !== 3 || blockData.length < 1 + 1 + 4 + 4) {
+      if (blockType !== 3 || blockData.length < 1) {
         continue;
       }
 
       const deliveryFlag = blockData.readUInt8(0);
-      if (deliveryFlag !== 0x00) {
+      let cloveOffset = 1;
+      if (deliveryFlag & 0x80) { // delay
+        cloveOffset += 4;
+      }
+      const deliveryType = (deliveryFlag >> 1) & 0x03;
+      if (deliveryType === 1 || deliveryType === 2) { // Destination or Router
+        cloveOffset += 32;
+      } else if (deliveryType === 3) { // Tunnel
+        cloveOffset += 36;
+      }
+
+      if (cloveOffset + 1 + 4 + 4 > blockData.length) {
         continue;
       }
 
-      const type = blockData.readUInt8(GARLIC_CLOVE_TYPE_OFFSET);
-      const uniqueId = blockData.readUInt32BE(GARLIC_CLOVE_UNIQUE_ID_OFFSET);
-      const expiration = blockData.readUInt32BE(GARLIC_CLOVE_EXPIRATION_OFFSET) * 1000;
-      const clovePayload = blockData.subarray(GARLIC_CLOVE_PAYLOAD_OFFSET);
-      cloves.push({
-        deliveryFlag,
-        message: {
-          type,
-          uniqueId,
-          expiration,
-          payload: Buffer.from(clovePayload)
-        }
-      });
+      // We only process LOCAL delivery (type 0) for now
+      if (deliveryType === 0) {
+        const type = blockData.readUInt8(cloveOffset);
+        const uniqueId = blockData.readUInt32BE(cloveOffset + 1);
+        const expiration = blockData.readUInt32BE(cloveOffset + 5) * 1000;
+        const clovePayload = blockData.subarray(cloveOffset + 9);
+        cloves.push({
+          deliveryFlag,
+          message: {
+            type,
+            uniqueId,
+            expiration,
+            payload: Buffer.from(clovePayload)
+          }
+        });
+      }
     }
 
     return cloves;
