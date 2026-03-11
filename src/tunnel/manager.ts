@@ -39,6 +39,9 @@ export interface TunnelBuildRequest {
   hops: { routerHash: Uint8Array; tunnelId: number }[];
   replyTunnelId: number;
   replyGateway: Uint8Array;
+  recordOrder: number[];
+  numRecords: number;
+  hopReplyKeys: { replyKey: Uint8Array; replyIV: Uint8Array }[];
 }
 
 export interface TunnelBuildRecord {
@@ -95,7 +98,10 @@ export class TunnelManager extends EventEmitter {
         tunnelId: h.tunnelId
       })),
       replyTunnelId: 0,
-      replyGateway: this.localRouterInfo.getRouterHash()
+      replyGateway: this.localRouterInfo.getRouterHash(),
+      recordOrder: [],
+      numRecords: 0,
+      hopReplyKeys: hops.map((h) => ({ replyKey: h.replyKey, replyIV: h.replyIV }))
     };
     
     this.pendingBuilds.set(replyMessageId, buildRequest);
@@ -153,21 +159,33 @@ export class TunnelManager extends EventEmitter {
   }
 
   private async sendTunnelBuildMessage(tunnel: Tunnel, hops: TunnelHop[]): Promise<void> {
-    const records: Buffer[] = hops.map((hop, i) => {
+    const numRecords = Math.max(4, Math.min(8, hops.length));
+    const records: Buffer[] = Array.from({ length: numRecords }, () => Buffer.from(Crypto.randomBytes(528)));
+    const order = this.shuffleIndices(numRecords).slice(0, hops.length);
+
+    for (let i = 0; i < hops.length; i++) {
+      const hop = hops[i];
       const nextHop = i < hops.length - 1 ? hops[i + 1] : null;
       const clear = this.buildTunnelBuildRequestRecord(tunnel, hop, nextHop, i);
       const encrypted = this.encryptBuildRecordForHop(hop, clear);
       const toPeer = Buffer.from(hop.routerHash).subarray(0, 16);
-      return Buffer.concat([toPeer, encrypted]);
-    });
+      records[order[i]] = Buffer.concat([toPeer, encrypted]);
+    }
 
     // garlic/tunnel build record peeling with per-hop reply keys (i2pd style)
     for (let i = hops.length - 2; i >= 0; i--) {
-      for (let j = i + 1; j < records.length; j++) {
-        const rec = records[j];
+      for (let j = i + 1; j < hops.length; j++) {
+        const rec = records[order[j]];
         const peeled = Crypto.aesEncryptCBC(rec.subarray(16), hops[i].replyKey, hops[i].replyIV);
-        records[j] = Buffer.concat([rec.subarray(0, 16), peeled]);
+        records[order[j]] = Buffer.concat([rec.subarray(0, 16), peeled]);
       }
+    }
+
+    for (const pending of this.pendingBuilds.values()) {
+      if (pending.tunnelId !== tunnel.id) continue;
+      pending.recordOrder = order;
+      pending.numRecords = numRecords;
+      break;
     }
 
     this.emit('sendTunnelBuild', {
@@ -176,6 +194,15 @@ export class TunnelManager extends EventEmitter {
       messageId: tunnel.id,
       records
     });
+  }
+
+  private shuffleIndices(count: number): number[] {
+    const values = Array.from({ length: count }, (_, i) => i);
+    for (let i = values.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [values[i], values[j]] = [values[j], values[i]];
+    }
+    return values;
   }
 
   private buildTunnelBuildRequestRecord(
@@ -261,12 +288,49 @@ export class TunnelManager extends EventEmitter {
     const count = reply.readUInt8(0);
     if (reply.length < 1 + count * 528) return;
 
-    // Minimal acceptance path: mark all currently-pending builds as successful.
-    // Full per-record decrypt/retcode validation is not available yet.
-    for (const pending of this.pendingBuilds.values()) {
-      this.emit('tunnelBuildSuccess', { tunnelId: pending.tunnelId });
+    const entries = Array.from(this.pendingBuilds.entries());
+    if (entries.length === 0) return;
+    const [messageId, pending] = entries[0];
+
+    const records: Buffer[] = [];
+    let offset = 1;
+    for (let i = 0; i < count; i++) {
+      records.push(Buffer.from(reply.subarray(offset, offset + 528)));
+      offset += 528;
     }
-    this.pendingBuilds.clear();
+
+    // reverse-peel to reveal each hop record status
+    for (let i = pending.hopReplyKeys.length - 2; i >= 0; i--) {
+      for (let j = i + 1; j < pending.hopReplyKeys.length; j++) {
+        const recordIndex = pending.recordOrder[j] ?? j;
+        const rec = records[recordIndex];
+        const decrypted = Crypto.aesDecryptCBC(
+          rec.subarray(16),
+          pending.hopReplyKeys[i].replyKey,
+          pending.hopReplyKeys[i].replyIV
+        );
+        records[recordIndex] = Buffer.concat([rec.subarray(0, 16), decrypted]);
+      }
+    }
+
+    let success = true;
+    for (let i = 0; i < pending.hopReplyKeys.length; i++) {
+      const recordIndex = pending.recordOrder[i] ?? i;
+      const record = records[recordIndex];
+      const retCode = record.readUInt8(527);
+      if (retCode !== 0) {
+        success = false;
+        break;
+      }
+    }
+
+    this.pendingBuilds.delete(messageId);
+    if (success) {
+      this.emit('tunnelBuildSuccess', { tunnelId: pending.tunnelId });
+    } else {
+      this.tunnels.delete(pending.tunnelId);
+      this.emit('tunnelBuildFailed', { tunnelId: pending.tunnelId });
+    }
   }
 
   getTunnel(tunnelId: number): Tunnel | undefined {
