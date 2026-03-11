@@ -5,12 +5,22 @@ import { chacha20poly1305 } from '@noble/ciphers/chacha';
 import { randomBytes, createCipheriv, createDecipheriv } from 'crypto';
 import { siphash } from 'bsip';
 
+
+export interface NoiseNState {
+  h: Buffer;
+  ck: Buffer;
+  key: Buffer;
+}
+
 export interface KeyPair {
   privateKey: Uint8Array;
   publicKey: Uint8Array;
 }
 
 export class Crypto {
+  private static readonly CHACHA_NONCE_LEN = 12;
+  private static readonly NOISE_N_PROTOCOL_NAME = Buffer.from('Noise_N_25519_ChaChaPoly_SHA256', 'ascii');
+
   static generateKeyPair(): KeyPair {
     const privateKey = x25519.utils.randomPrivateKey();
     const publicKey = x25519.getPublicKey(privateKey);
@@ -123,6 +133,116 @@ export class Crypto {
     decipher.setAutoPadding(false);
     const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     return decrypted;
+  }
+
+  static encryptTaggedGarlicReply(
+    sessionKey: Uint8Array,
+    sessionTag: Uint8Array,
+    plaintext: Uint8Array
+  ): Buffer {
+    if (sessionKey.length !== 32) throw new Error('Tagged garlic session key must be 32 bytes');
+    if (sessionTag.length !== 8) throw new Error('Tagged garlic session tag must be 8 bytes');
+    const nonce = new Uint8Array(this.CHACHA_NONCE_LEN);
+    return Buffer.from(this.encryptChaCha20Poly1305(sessionKey, nonce, plaintext, sessionTag));
+  }
+
+  static decryptTaggedGarlicReply(
+    sessionKey: Uint8Array,
+    sessionTag: Uint8Array,
+    ciphertext: Uint8Array
+  ): Buffer {
+    if (sessionKey.length !== 32) throw new Error('Tagged garlic session key must be 32 bytes');
+    if (sessionTag.length !== 8) throw new Error('Tagged garlic session tag must be 8 bytes');
+    const nonce = new Uint8Array(this.CHACHA_NONCE_LEN);
+    return Buffer.from(this.decryptChaCha20Poly1305(sessionKey, nonce, ciphertext, sessionTag));
+  }
+
+
+  static initNoiseNState(remoteStaticPublicKey: Uint8Array): NoiseNState {
+    if (remoteStaticPublicKey.length !== 32) {
+      throw new Error('Noise_N remote static public key must be 32 bytes');
+    }
+    const hPadded = Buffer.alloc(32);
+    this.NOISE_N_PROTOCOL_NAME.copy(hPadded);
+    const ck = Buffer.from(hPadded);
+    const hInitial = Buffer.from(this.sha256(hPadded));
+    const h = Buffer.from(this.sha256(Buffer.concat([hInitial, Buffer.from(remoteStaticPublicKey)])));
+    return {
+      h,
+      ck,
+      key: Buffer.alloc(32)
+    };
+  }
+
+  static mixHash(state: NoiseNState, data: Uint8Array): void {
+    state.h = Buffer.from(this.sha256(Buffer.concat([state.h, Buffer.from(data)])));
+  }
+
+  static mixKey(state: NoiseNState, inputKeyMaterial: Uint8Array): void {
+    const derived = Buffer.from(this.hkdf(state.ck, inputKeyMaterial, new Uint8Array(0), 64));
+    state.ck = derived.subarray(0, 32);
+    state.key = derived.subarray(32, 64);
+  }
+
+  static encryptNoiseNGarlicReply(
+    recipientStaticPublicKey: Uint8Array,
+    plaintext: Uint8Array
+  ): { ephemeralPublicKey: Buffer; ciphertext: Buffer } {
+    if (recipientStaticPublicKey.length !== 32) {
+      throw new Error('Noise_N recipient static public key must be 32 bytes');
+    }
+
+    const ephemeralKeyPair = this.generateEphemeralKeyPair();
+    const { h, key } = this.deriveNoiseNKey(
+      Buffer.from(recipientStaticPublicKey),
+      Buffer.from(ephemeralKeyPair.publicKey),
+      this.x25519DiffieHellman(ephemeralKeyPair.privateKey, recipientStaticPublicKey)
+    );
+    const nonce = new Uint8Array(this.CHACHA_NONCE_LEN);
+
+    return {
+      ephemeralPublicKey: Buffer.from(ephemeralKeyPair.publicKey),
+      ciphertext: Buffer.from(this.encryptChaCha20Poly1305(key, nonce, plaintext, h))
+    };
+  }
+
+  static decryptNoiseNGarlicReply(
+    recipientStaticPrivateKey: Uint8Array,
+    recipientStaticPublicKey: Uint8Array,
+    ephemeralPublicKey: Uint8Array,
+    ciphertext: Uint8Array
+  ): Buffer {
+    if (recipientStaticPrivateKey.length !== 32) {
+      throw new Error('Noise_N recipient static private key must be 32 bytes');
+    }
+    if (recipientStaticPublicKey.length !== 32) {
+      throw new Error('Noise_N recipient static public key must be 32 bytes');
+    }
+    if (ephemeralPublicKey.length !== 32) {
+      throw new Error('Noise_N ephemeral public key must be 32 bytes');
+    }
+
+    const { h, key } = this.deriveNoiseNKey(
+      Buffer.from(recipientStaticPublicKey),
+      Buffer.from(ephemeralPublicKey),
+      this.x25519DiffieHellman(recipientStaticPrivateKey, ephemeralPublicKey)
+    );
+    const nonce = new Uint8Array(this.CHACHA_NONCE_LEN);
+    return Buffer.from(this.decryptChaCha20Poly1305(key, nonce, ciphertext, h));
+  }
+
+  private static deriveNoiseNKey(
+    recipientStaticPublicKey: Buffer,
+    ephemeralPublicKey: Buffer,
+    sharedSecret: Uint8Array
+  ): { h: Buffer; key: Buffer } {
+    const state = this.initNoiseNState(recipientStaticPublicKey);
+    this.mixHash(state, ephemeralPublicKey);
+    this.mixKey(state, sharedSecret);
+    return {
+      h: state.h,
+      key: state.key
+    };
   }
 }
 

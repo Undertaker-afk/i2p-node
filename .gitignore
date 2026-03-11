@@ -26,6 +26,7 @@ peerProfiles/
 tunnels/
 logs/
 i2p-test-data/
+test-i2p-data/
 # IDE
 .vscode/
 .idea/
@@ -43,3 +44,4 @@ coverage/
 tmp/
 temp/
 *.tmp
+test-i2p-data/netDb/

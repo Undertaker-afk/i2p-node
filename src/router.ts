@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { EventEmitter } from 'events';
 import { gunzipSync, gzipSync } from 'zlib';
 import { Crypto } from './crypto/index.js';
@@ -8,6 +9,7 @@ import { parseI2PRouterInfo } from './data/router-info-i2p.js';
 import { I2NPMessages, I2NPMessageType } from './i2np/messages.js';
 import { NetworkDatabase } from './netdb/index.js';
 import { TunnelManager, TunnelType } from './tunnel/manager.js';
+import { decryptTunnelMessage } from './tunnel/message.js';
 import { PeerProfileManager } from './peer/profiles.js';
 import { NTCP2Transport } from './transport/ntcp2.js';
 import { SSU2Transport } from './transport/ssu2.js';
@@ -36,6 +38,29 @@ export interface I2PRouterOptions {
   enableWebUI?: boolean;
   webUIPort?: number;
 }
+
+interface PendingLeaseSetRequest {
+  targetHash: Buffer;
+  excluded: Set<string>;
+  attempts: number;
+  createdAt: number;
+  expiresAt: number;
+  candidateFloodfills: string[];
+  eciesTags: Set<string>;
+  retryTimer: NodeJS.Timeout | null;  // For retry delay (2.5s)
+  cleanupTimer: NodeJS.Timeout | null;  // For request timeout cleanup
+}
+
+interface PendingEciesReply {
+  sessionKey: Buffer;
+  targetHash: string;
+  createdAt: number;
+}
+
+const MAX_LEASESET_FLOODFILLS_PER_REQUEST = 7;
+const LEASESET_REQUEST_TIMEOUT_MS = 15000;
+const LEASESET_RETRY_DELAY_MS = 2500;
+const ECIES_REPLY_TTL_MS = 5 * 60 * 1000;
 
 export interface RouterStats {
   startTime: number;
@@ -71,6 +96,8 @@ export class I2PRouter extends EventEmitter {
   private identityEx: IdentityExBuildResult | null = null;
   private wireRouterInfo: Buffer | null = null;
   private ntcp2PublishedIV: Buffer | null = null;
+  private pendingLeaseSetRequests: Map<string, PendingLeaseSetRequest> = new Map();
+  private pendingEciesReplies: Map<string, PendingEciesReply> = new Map();
 
   constructor(options: I2PRouterOptions = {}) {
     super();
@@ -135,6 +162,13 @@ export class I2PRouter extends EventEmitter {
       // Update stats
       this.stats.knownPeers = this.netDb.getRouterInfoCount();
       this.stats.floodfillPeers = this.netDb.getFloodfillCount();
+
+      const storedHex = hash.toString('hex');
+      for (const req of this.pendingLeaseSetRequests.values()) {
+        if (req.candidateFloodfills.includes(storedHex)) {
+          this.tryNextLeaseSetLookup(req.targetHash);
+        }
+      }
     });
 
     // Forward leaseSetStored so callers can subscribe directly on the router
@@ -159,14 +193,14 @@ export class I2PRouter extends EventEmitter {
       });
     });
 
-    // Listen for LeaseSet lookup requests (type 0 = normal/any)
+    // Listen for LeaseSet lookup requests
     this.netDb.on('leaseSetLookup', ({ targetHash, floodfill }: { targetHash: Buffer; floodfill: RouterInfo }) => {
       logger.debug(
         `LeaseSet lookup for ${targetHash.toString('hex').slice(0, 16)}... via ${floodfill.getRouterHash().toString('hex').slice(0, 16)}...`,
         undefined,
         'Router'
       );
-      this.sendDatabaseLookup(targetHash, floodfill, 0).catch((err) => {
+      this.sendLeaseSetLookup(targetHash, floodfill).catch((err) => {
         logger.debug(`LeaseSet lookup failed: ${(err as Error).message}`, undefined, 'Router');
       });
     });
@@ -332,6 +366,11 @@ export class I2PRouter extends EventEmitter {
     logger.info('Stopping I2P Router...', undefined, 'Router');
 
     this.running = false;
+
+    for (const [targetHex] of this.pendingLeaseSetRequests) {
+      this.clearPendingLeaseSetRequest(targetHex);
+    }
+    this.pendingEciesReplies.clear();
 
     if (this.maintenanceInterval) {
       clearInterval(this.maintenanceInterval);
@@ -594,10 +633,19 @@ export class I2PRouter extends EventEmitter {
       case I2NPMessageType.DELIVERY_STATUS:
         this.handleDeliveryStatus(sessionId, message);
         break;
+      case I2NPMessageType.GARLIC:
+        this.handleGarlic(sessionId, message);
+        break;
+      case I2NPMessageType.TUNNEL_GATEWAY:
+      case I2NPMessageType.TUNNEL_DATA:
+        this.handleTunnelMessage(sessionId, message);
+        break;
       case I2NPMessageType.TUNNEL_BUILD:
+      case I2NPMessageType.VARIABLE_TUNNEL_BUILD:
         this.handleTunnelBuild(sessionId, message);
         break;
       case I2NPMessageType.TUNNEL_BUILD_REPLY:
+      case I2NPMessageType.VARIABLE_TUNNEL_BUILD_REPLY:
         this.handleTunnelBuildReply(sessionId, message);
         break;
       default:
@@ -640,12 +688,14 @@ export class I2PRouter extends EventEmitter {
             this.ntcp2.send(sessionId, dsWire);
           }
         } else {
-          // Reply through tunnel — wrap in TunnelGateway
-          // For now send directly to the session; full tunnel routing is TODO
-          this.ntcp2.send(sessionId, dsWire);
+          this.sendWireViaReplyTunnel(_replyGateway, replyTunnelId, dsWire, sessionId).catch((err) => {
+            logger.debug(`sendWireViaReplyTunnel failed: ${(err as Error).message}`, undefined, 'Router');
+          });
         }
-        this.stats.messagesSent++;
-        this.stats.bytesSent += dsWire.length;
+        if (replyTunnelId === 0) {
+          this.stats.messagesSent++;
+          this.stats.bytesSent += dsWire.length;
+        }
       }
     }
 
@@ -684,6 +734,7 @@ export class I2PRouter extends EventEmitter {
 
       if (leaseSet) {
         this.netDb.storeLeaseSet(leaseSet);
+        this.clearPendingLeaseSetRequest(key.toString('hex'));
         logger.debug(
           `DatabaseStore (LS1) for ${key.toString('hex').slice(0, 16)}...`,
           undefined,
@@ -698,6 +749,7 @@ export class I2PRouter extends EventEmitter {
 
       if (leaseSet) {
         this.netDb.storeLeaseSet(leaseSet);
+        this.clearPendingLeaseSetRequest(key.toString('hex'));
         logger.debug(
           `DatabaseStore (LS2) for ${key.toString('hex').slice(0, 16)}...`,
           undefined,
@@ -725,15 +777,16 @@ export class I2PRouter extends EventEmitter {
     if (buf.length < 32 + 32 + 1 + 2) return;
 
     const key = buf.subarray(0, 32);
-    const _fromHash = buf.subarray(32, 64);
+    const fromHash = buf.subarray(32, 64);
     const flags = buf.readUInt8(64);
 
     const hasDeliveryFlag = (flags & 0x01) !== 0;
+    const hasEciesFlag = (flags & 0x10) !== 0;
     let excludedOffset = 65;
-    // let replyTunnelId = 0;
+    let replyTunnelId: number | undefined;
     if (hasDeliveryFlag) {
       if (buf.length < excludedOffset + 4) return;
-      // replyTunnelId = buf.readUInt32BE(excludedOffset);
+      replyTunnelId = buf.readUInt32BE(excludedOffset);
       excludedOffset += 4;
     }
 
@@ -756,6 +809,19 @@ export class I2PRouter extends EventEmitter {
     for (let i = 0; i < numExcluded && excludedOffset + 32 <= buf.length; i++) {
       excludedSet.add(buf.subarray(excludedOffset, excludedOffset + 32).toString('hex'));
       excludedOffset += 32;
+    }
+
+    let eciesSessionKey: Buffer | undefined;
+    let eciesSessionTag: Buffer | undefined;
+    if (hasEciesFlag) {
+      if (buf.length < excludedOffset + 32 + 1 + 8) return;
+      eciesSessionKey = buf.subarray(excludedOffset, excludedOffset + 32);
+      excludedOffset += 32;
+      const numTags = buf.readUInt8(excludedOffset);
+      excludedOffset += 1;
+      if (numTags < 1 || buf.length < excludedOffset + 8) return;
+      eciesSessionTag = buf.subarray(excludedOffset, excludedOffset + 8);
+      excludedOffset += 8;
     }
 
     let replied = false;
@@ -786,10 +852,8 @@ export class I2PRouter extends EventEmitter {
             const data = Buffer.concat([size, compressed]);
             const ourHash = this.routerInfo!.getRouterHash();
             const storeMsg = I2NPMessages.createDatabaseStore(key, data, 0, ourHash);
-            const wire = I2NPMessages.serializeMessage(storeMsg);
-            this.ntcp2.send(sessionId, wire);
-            this.stats.messagesSent++;
-            this.stats.bytesSent += wire.length;
+            this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag);
+            this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag).catch((err) => { logger.debug(`sendDatabaseLookupReply failed: ${(err as Error).message}`, undefined, 'Router'); });
             replied = true;
           }
         }
@@ -806,10 +870,8 @@ export class I2PRouter extends EventEmitter {
         } else {
           const ourHash = this.routerInfo!.getRouterHash();
           const storeMsg = I2NPMessages.createDatabaseStore(key, lsData, 0, ourHash, ls.storeType);
-          const wire = I2NPMessages.serializeMessage(storeMsg);
-          this.ntcp2.send(sessionId, wire);
-          this.stats.messagesSent++;
-          this.stats.bytesSent += wire.length;
+          this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag);
+          this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag).catch((err) => { logger.debug(`sendDatabaseLookupReply failed: ${(err as Error).message}`, undefined, 'Router'); });
           replied = true;
         }
       }
@@ -824,10 +886,8 @@ export class I2PRouter extends EventEmitter {
         .map(ff => ff.getRouterHash());
       const ourHash = this.routerInfo!.getRouterHash();
       const searchReply = I2NPMessages.createDatabaseSearchReply(key, routerHashes, ourHash);
-      const wire = I2NPMessages.serializeMessage(searchReply);
-      this.ntcp2.send(sessionId, wire);
-      this.stats.messagesSent++;
-      this.stats.bytesSent += wire.length;
+      this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, searchReply, eciesSessionKey, eciesSessionTag).catch((err) => { logger.debug(`sendDatabaseLookupReply failed: ${(err as Error).message}`, undefined, 'Router'); });
+      replied = true;
     }
 
     this.emit('databaseLookup', { sessionId, message });
@@ -854,6 +914,18 @@ export class I2PRouter extends EventEmitter {
     // Delegate to NetDbRequests which handles retry logic and discovered router scheduling
     this.netDbRequests.handleSearchReply(key, routerHashes, isExploratory);
 
+    // LeaseSet iterative follow-up (i2pd-style): keep querying next closest floodfills.
+    if (this.pendingLeaseSetRequests.has(key.toString('hex'))) {
+      const req = this.pendingLeaseSetRequests.get(key.toString('hex'))!;
+      for (const h of routerHashes) {
+        const routerHex = h.toString('hex');
+        if (!req.excluded.has(routerHex) && !req.candidateFloodfills.includes(routerHex)) {
+          req.candidateFloodfills.push(routerHex);
+        }
+      }
+      this.tryNextLeaseSetLookup(key);
+    }
+
     this.emit('databaseSearchReply', { sessionId, message });
   }
 
@@ -861,11 +933,127 @@ export class I2PRouter extends EventEmitter {
     this.emit('deliveryStatus', { sessionId, message });
   }
 
+  private handleGarlic(sessionId: string, message: ReturnType<typeof I2NPMessages.parseMessage>): void {
+    const parsed = I2NPMessages.parseGarlicOuterMessage(message.payload);
+    if (!parsed || parsed.body.length < 8 + 16) {
+      logger.debug('Failed to parse Garlic message', undefined, 'Router');
+      return;
+    }
+
+    let plaintext: Buffer | null = null;
+    let usedTag: string | null = null;
+
+    const possibleTag = parsed.body.subarray(0, 8);
+    const pending = this.pendingEciesReplies.get(possibleTag.toString('hex'));
+    if (pending) {
+      try {
+        plaintext = Crypto.decryptTaggedGarlicReply(
+          pending.sessionKey,
+          possibleTag,
+          parsed.body.subarray(8)
+        );
+        usedTag = possibleTag.toString('hex');
+      } catch (err) {
+        logger.debug(`Tagged garlic decrypt failed: ${(err as Error).message}`, undefined, 'Router');
+      }
+    }
+
+    if (!plaintext && this.identity) {
+      if (parsed.body.length < 32 + 16) {
+        logger.debug('Garlic body too short for router-context decrypt', undefined, 'Router');
+        return;
+      }
+      try {
+        plaintext = Crypto.decryptNoiseNGarlicReply(
+          this.identity.encryptionPrivateKey,
+          this.identity.identity.encryptionPublicKey,
+          parsed.body.subarray(0, 32),
+          parsed.body.subarray(32)
+        );
+      } catch (err) {
+        logger.debug(`Router-context garlic decrypt failed: ${(err as Error).message}`, undefined, 'Router');
+        return;
+      }
+    }
+
+    if (!plaintext) {
+      logger.debug('Garlic message could not be decrypted', undefined, 'Router');
+      return;
+    }
+
+    if (usedTag) {
+      this.clearPendingEciesReply(usedTag);
+    }
+
+    const cloves = I2NPMessages.parseGarlicCloveMessages(plaintext);
+    if (!cloves) {
+      logger.debug('Failed to parse garlic cloves', undefined, 'Router');
+      return;
+    }
+
+    for (const clove of cloves) {
+      this.handleI2NPMessage(sessionId, clove.message);
+    }
+  }
+
+  private handleTunnelMessage(sessionId: string, message: ReturnType<typeof I2NPMessages.parseMessage>): void {
+    if (message.payload.length < 5 || !this.tunnelManager) {
+      return;
+    }
+
+    const tunnelId = message.payload.readUInt32BE(0);
+    const tunnel = this.tunnelManager.getTunnel(tunnelId);
+    if (!tunnel || tunnel.type !== TunnelType.INBOUND) {
+      return;
+    }
+
+    const innerOffset = message.type === I2NPMessageType.TUNNEL_GATEWAY ? 6 : 4;
+    if (message.payload.length < innerOffset + 9) {
+      return;
+    }
+    const tunnelPayload = message.payload.subarray(innerOffset);
+
+    // Zero-hop inbound tunnels carry a direct inner I2NP message.
+    if (tunnel.hops.length === 0) {
+      try {
+        const inner = I2NPMessages.parseMessage(tunnelPayload);
+        this.handleI2NPMessage(sessionId, inner);
+      } catch (err) {
+        logger.debug(`Failed to unwrap zero-hop tunnel message: ${(err as Error).message}`, undefined, 'Router');
+      }
+      return;
+    }
+
+    // Multi-hop inbound tunnels carry encrypted 1028-byte tunnel messages.
+    const candidate = message.payload.length === 1028 ? message.payload : tunnelPayload;
+    let current = candidate;
+    // Decrypt each layer in order (gateway → endpoint)
+    for (const hop of tunnel.hops) {
+      const unwrapped = decryptTunnelMessage(hop.tunnelId, hop.layerKey, current);
+      if (!unwrapped) {
+        logger.debug('Failed to decrypt layer for hop', undefined, 'Router');
+        return;
+      }
+      current = Buffer.from(unwrapped.fragment);
+    }
+    const fragment = current;
+
+    try {
+      const inner = I2NPMessages.parseMessage(fragment);
+      this.handleI2NPMessage(sessionId, inner);
+    } catch (err) {
+      logger.debug(`Failed to parse multi-hop tunnel fragment: ${(err as Error).message}`, undefined, 'Router');
+    }
+  }
+
   private handleTunnelBuild(sessionId: string, message: ReturnType<typeof I2NPMessages.parseMessage>): void {
     this.emit('tunnelBuild', { sessionId, message });
   }
 
   private handleTunnelBuildReply(sessionId: string, message: ReturnType<typeof I2NPMessages.parseMessage>): void {
+    if (message.type === I2NPMessageType.VARIABLE_TUNNEL_BUILD_REPLY && this.tunnelManager) {
+      this.tunnelManager.handleVariableTunnelBuildReply(message.uniqueId, message.payload);
+    }
     this.emit('tunnelBuildReply', { sessionId, message });
   }
 
@@ -905,6 +1093,23 @@ export class I2PRouter extends EventEmitter {
       this.updateStats();
     });
 
+    this.tunnelManager.on('sendTunnelBuild', async ({ firstHop, messageId, records }) => {
+      if (!this.ntcp2) return;
+      try {
+        const endpoint = this.getNtcpEndpoint(firstHop);
+        if (!endpoint) return;
+        await this.ntcp2.connect(endpoint.host, endpoint.port, firstHop);
+        const sessionId = `${endpoint.host}:${endpoint.port}`;
+        const build = I2NPMessages.createVariableTunnelBuild(records, messageId);
+        const wire = I2NPMessages.serializeMessage(build);
+        this.ntcp2.send(sessionId, wire);
+        this.stats.messagesSent++;
+        this.stats.bytesSent += wire.length;
+      } catch (err) {
+        logger.debug(`Failed to send tunnel build: ${(err as Error).message}`, undefined, 'Tunnel');
+      }
+    });
+
     this.tunnelManager.on('tunnelBuildFailed', ({ tunnelId }) => {
       this.stats.tunnelBuildFailures++;
       this.emit('tunnelBuildFailed', { tunnelId });
@@ -923,12 +1128,16 @@ export class I2PRouter extends EventEmitter {
   }
 
   private performMaintenance(): void {
+    this.cleanupPendingLeaseSetRequests();
+    this.cleanupPendingEciesReplies();
+
     if (this.tunnelManager) {
       this.tunnelManager.cleanupExpiredTunnels();
 
-      // Ensure at least one inbound and one outbound tunnel exist.
+      // Keep a local zero-hop inbound reply tunnel available for LeaseSet lookups
+      // until full network tunnel build/reply routing is implemented.
       if (this.tunnelManager.getInboundTunnels().length === 0) {
-        this.tunnelManager.buildTunnel(TunnelType.INBOUND, 1).catch(() => {
+        this.tunnelManager.buildTunnel(TunnelType.INBOUND, 0).catch(() => {
           /* ignore for now */
         });
       }
@@ -1063,13 +1272,13 @@ export class I2PRouter extends EventEmitter {
     const existing = this.netDb.lookupLeaseSet(hash);
     if (existing) return existing;
 
-    const floodfills = this.netDb.findClosestFloodfills(hash, 3);
-    if (!floodfills.length) return null;
+    let req = this.pendingLeaseSetRequests.get(targetHex);
+    if (!req) {
+      req = this.createPendingLeaseSetRequest(hash, targetHex, timeoutMs);
+      this.pendingLeaseSetRequests.set(targetHex, req);
+    }
 
-    // Fire off lookups (LeaseSet type = 1)
-    await Promise.all(
-      floodfills.map((ff) => this.sendDatabaseLookup(hash, ff, 1).catch(() => undefined))
-    );
+    this.tryNextLeaseSetLookup(hash);
 
     return new Promise<LeaseSet | null>((resolve) => {
       const onStored = ({ hash: hs, leaseSet }: { hash: Buffer; leaseSet: LeaseSet }) => {
@@ -1080,6 +1289,7 @@ export class I2PRouter extends EventEmitter {
       };
       const onTimeout = () => {
         cleanup();
+        this.clearPendingLeaseSetRequest(targetHex);
         resolve(null);
       };
       const cleanup = () => {
@@ -1090,20 +1300,110 @@ export class I2PRouter extends EventEmitter {
     });
   }
 
+  private async sendLeaseSetLookup(targetHash: Buffer, floodfill: RouterInfo): Promise<void> {
+    const keyHex = targetHash.toString('hex');
+    let req = this.pendingLeaseSetRequests.get(keyHex);
+    if (!req) {
+      req = this.createPendingLeaseSetRequest(targetHash, keyHex);
+      this.pendingLeaseSetRequests.set(keyHex, req);
+    }
+    const floodfillHash = floodfill.getRouterHash().toString('hex');
+    if (req.excluded.has(floodfillHash)) {
+      return;
+    }
+    req.excluded.add(floodfillHash);
+    req.candidateFloodfills = req.candidateFloodfills.filter((candidate) => candidate !== floodfillHash);
+    req.attempts++;
+    this.scheduleLeaseSetRetry(req);
+    await this.sendDatabaseLookup(targetHash, floodfill, 1, Array.from(req.excluded, (v) => Buffer.from(v, 'hex')), req);
+  }
+
+  private tryNextLeaseSetLookup(targetHash: Buffer): void {
+    const keyHex = targetHash.toString('hex');
+    const req = this.pendingLeaseSetRequests.get(keyHex);
+    if (!req) return;
+    if (this.netDb.lookupLeaseSet(targetHash)) {
+      this.clearPendingLeaseSetRequest(keyHex);
+      return;
+    }
+    if (this.shouldCleanupLeaseSetRequest(req)) {
+      this.clearPendingLeaseSetRequest(keyHex);
+      return;
+    }
+
+    let next: RouterInfo | undefined;
+    while (req.candidateFloodfills.length > 0 && !next) {
+      const candidateHash = req.candidateFloodfills[0]; // Peek at first candidate
+      if (!candidateHash || req.excluded.has(candidateHash)) {
+        req.candidateFloodfills.shift(); // Skip and remove excluded/invalid
+        continue;
+      }
+      const candidateInfo = this.netDb.lookupRouterInfo(Buffer.from(candidateHash, 'hex'));
+      if (candidateInfo) {
+        next = candidateInfo;
+        req.candidateFloodfills.shift(); // Only remove after successfully obtaining RouterInfo
+      } else {
+        // RouterInfo not yet available - don't discard this candidate.
+        // Wait for routerInfoStored event to retry.
+        logger.debug(`Deferred LeaseSet lookup: ${candidateHash.slice(0, 16)}... not in NetDb yet`, undefined, 'Router');
+        return;
+      }
+    }
+
+    if (!next) {
+      next = this.netDb
+        .findClosestFloodfills(targetHash, MAX_LEASESET_FLOODFILLS_PER_REQUEST)
+        .find((ff) => !req.excluded.has(ff.getRouterHash().toString('hex')));
+    }
+
+    if (!next) {
+      this.clearPendingLeaseSetRequest(keyHex);
+      return;
+    }
+    this.sendLeaseSetLookup(targetHash, next).catch(() => undefined);
+  }
+
   /**
    * Generic DatabaseLookup sender used for exploratory (routerInfo) and targeted (LeaseSet) lookups.
    */
   private async sendDatabaseLookup(
     targetHash: Buffer,
     floodfill: RouterInfo,
-    lookupType: 0 | 1 | 2 | 3
+    lookupType: 0 | 1 | 2 | 3,
+    excludedPeers: Buffer[] = [],
+    leaseSetRequest?: PendingLeaseSetRequest
   ): Promise<void> {
     // Prefer NTCP2/NTCP with full keys.
     if (this.ntcp2) {
       const endpoint = this.getNtcpEndpoint(floodfill);
       if (endpoint) {
         const fromHash = this.routerInfo!.getRouterHash();
-        const msg = I2NPMessages.createDatabaseLookup(targetHash, fromHash, lookupType, []);
+        const opts: {
+          replyTunnelId?: number;
+          eciesSessionKey?: Buffer;
+          eciesSessionTag?: Buffer;
+        } = {};
+        let lookupFromHash = fromHash;
+
+        if (lookupType === 1) {
+          const replyTunnel = await this.ensureLeaseSetReplyTunnel();
+          if (!replyTunnel) {
+            throw new Error('Failed to create zero-hop inbound tunnel for LeaseSet lookup reply');
+          }
+          lookupFromHash = replyTunnel.gatewayHash;
+          opts.replyTunnelId = replyTunnel.tunnelId;
+          opts.eciesSessionKey = Buffer.from(Crypto.randomBytes(32));
+          opts.eciesSessionTag = Buffer.from(Crypto.randomBytes(8));
+          const tagHex = opts.eciesSessionTag.toString('hex');
+          this.pendingEciesReplies.set(tagHex, {
+            sessionKey: opts.eciesSessionKey,
+            targetHash: targetHash.toString('hex'),
+            createdAt: Date.now()
+          });
+          leaseSetRequest?.eciesTags.add(tagHex);
+        }
+
+        const msg = I2NPMessages.createDatabaseLookup(targetHash, lookupFromHash, lookupType, excludedPeers, opts);
         const wire = I2NPMessages.serializeMessage(msg);
         await this.ntcp2.connect(endpoint.host, endpoint.port, floodfill);
         const sessionId = `${endpoint.host}:${endpoint.port}`;
@@ -1116,6 +1416,233 @@ export class I2PRouter extends EventEmitter {
 
     // SSU2 path intentionally disabled while transport is MVP-only and not
     // interoperable with stock routers yet.
+  }
+
+
+  private async sendWireViaReplyTunnel(
+    replyGatewayHash: Buffer | null,
+    replyTunnelId: number,
+    wire: Buffer,
+    fallbackSessionId: string
+  ): Promise<void> {
+    if (!this.ntcp2 || !this.tunnelManager || !replyGatewayHash) {
+      if (this.ntcp2) this.ntcp2.send(fallbackSessionId, wire);
+      return;
+    }
+
+    const tunnelHeader = Buffer.alloc(4);
+    tunnelHeader.writeUInt32BE(replyTunnelId >>> 0, 0);
+    const tunnelLen = Buffer.alloc(2);
+    tunnelLen.writeUInt16BE(wire.length >>> 0, 0);
+    const gatewayMsgWire = I2NPMessages.serializeMessage({
+      type: I2NPMessageType.TUNNEL_GATEWAY,
+      uniqueId: crypto.randomBytes(4).readUInt32BE(0),
+      expiration: Date.now() + 30000,
+      payload: Buffer.concat([tunnelHeader, tunnelLen, wire])
+    });
+
+    const outbound = this.tunnelManager.getOutboundTunnels()[0];
+    if (!outbound) {
+      this.ntcp2.send(fallbackSessionId, wire);
+      return;
+    }
+
+    if (outbound.hops.length === 0) {
+      const gatewaySessionId = this.ntcp2.findSessionIdByRouterHash(replyGatewayHash);
+      this.ntcp2.send(gatewaySessionId ?? fallbackSessionId, gatewayMsgWire);
+      this.stats.messagesSent++;
+      this.stats.bytesSent += gatewayMsgWire.length;
+      return;
+    }
+
+    const firstHop = outbound.hops[0].routerInfo;
+    const endpoint = this.getNtcpEndpoint(firstHop);
+    if (!endpoint) {
+      this.ntcp2.send(fallbackSessionId, wire);
+      return;
+    }
+
+    await this.ntcp2.connect(endpoint.host, endpoint.port, firstHop);
+    const firstHopSession = `${endpoint.host}:${endpoint.port}`;
+    const encrypted = this.tunnelManager.encryptForTunnel(outbound.id, gatewayMsgWire)[0];
+    const outer = I2NPMessages.serializeMessage({
+      type: I2NPMessageType.TUNNEL_DATA,
+      uniqueId: crypto.randomBytes(4).readUInt32BE(0),
+      expiration: Date.now() + 30000,
+      payload: encrypted
+    });
+    this.ntcp2.send(firstHopSession, outer);
+    this.stats.messagesSent++;
+    this.stats.bytesSent += outer.length;
+  }
+
+  private async sendDatabaseLookupReply(
+    sessionId: string,
+    replyGatewayHash: Buffer,
+    replyTunnelId: number | undefined,
+    innerMessage: ReturnType<typeof I2NPMessages.createDatabaseStore> | ReturnType<typeof I2NPMessages.createDatabaseSearchReply>,
+    eciesSessionKey?: Buffer,
+    eciesSessionTag?: Buffer
+  ): Promise<void> {
+    if (!this.ntcp2) return;
+
+    let replyMessage = innerMessage;
+    if (eciesSessionKey && eciesSessionTag) {
+      const garlicPayload = I2NPMessages.createGarlicClovePayload([innerMessage]);
+      const ciphertext = Crypto.encryptTaggedGarlicReply(eciesSessionKey, eciesSessionTag, garlicPayload);
+      const body = Buffer.concat([eciesSessionTag, ciphertext]);
+      const lengthBuf = Buffer.alloc(4);
+      lengthBuf.writeUInt32BE(body.length);
+      replyMessage = {
+        type: I2NPMessageType.GARLIC,
+        uniqueId: crypto.randomBytes(4).readUInt32BE(0),
+        expiration: Date.now() + 30000,
+        payload: Buffer.concat([lengthBuf, body])
+      };
+    }
+
+    let wire = I2NPMessages.serializeMessage(replyMessage);
+    if (replyTunnelId && replyTunnelId > 0) {
+      const tunnelHeader = Buffer.alloc(4);
+      tunnelHeader.writeUInt32BE(replyTunnelId);
+      const tunnelLen = Buffer.alloc(2);
+      tunnelLen.writeUInt16BE(wire.length >>> 0);
+      wire = I2NPMessages.serializeMessage({
+        type: I2NPMessageType.TUNNEL_GATEWAY,
+        uniqueId: crypto.randomBytes(4).readUInt32BE(0),
+        expiration: Date.now() + 30000,
+        payload: Buffer.concat([tunnelHeader, tunnelLen, wire])
+      });
+    }
+
+    let targetSessionId: string | null = null;
+    const gatewaySessionId = this.ntcp2.findSessionIdByRouterHash(replyGatewayHash);
+    if (gatewaySessionId) {
+      targetSessionId = gatewaySessionId;
+    } else if (replyTunnelId && replyTunnelId > 0) {
+      const routerInfo = this.netDb.lookupRouterInfo(replyGatewayHash);
+      if (!routerInfo) {
+        logger.warn(`Cannot reply via tunnel to unknown gateway ${replyGatewayHash.toString('hex').slice(0,16)}...`);
+        return;
+      }
+      const endpoint = this.getNtcpEndpoint(routerInfo);
+      if (!endpoint) {
+        logger.warn(`No NTCP endpoint for reply gateway ${replyGatewayHash.toString('hex').slice(0,16)}...`);
+        return;
+      }
+      await this.ntcp2.connect(endpoint.host, endpoint.port, routerInfo);
+      const newSessionId = this.ntcp2.findSessionIdByRouterHash(replyGatewayHash);
+      if (!newSessionId) {
+        logger.warn(`Failed to establish session to reply gateway ${replyGatewayHash.toString('hex').slice(0,16)}...`);
+        return;
+      }
+      targetSessionId = newSessionId;
+    } else {
+      targetSessionId = sessionId;
+    }
+
+    if (!targetSessionId) {
+      logger.warn('No valid session ID for DatabaseLookup reply');
+      return;
+    }
+
+    this.ntcp2.send(targetSessionId, wire);
+    this.stats.messagesSent++;
+    this.stats.bytesSent += wire.length;
+  }
+
+  private createPendingLeaseSetRequest(
+    targetHash: Buffer,
+    targetHex: string,
+    timeoutMs = LEASESET_REQUEST_TIMEOUT_MS
+  ): PendingLeaseSetRequest {
+    return {
+      targetHash: Buffer.from(targetHash),
+      excluded: new Set(),
+      attempts: 0,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + timeoutMs,
+      candidateFloodfills: [],
+      eciesTags: new Set(),
+      retryTimer: null,
+      cleanupTimer: setTimeout(() => {
+        this.clearPendingLeaseSetRequest(targetHex);
+      }, timeoutMs)
+    };
+  }
+
+  private clearPendingLeaseSetRequest(targetHex: string): void {
+    const req = this.pendingLeaseSetRequests.get(targetHex);
+    if (!req) return;
+    if (req.retryTimer) {
+      clearTimeout(req.retryTimer);
+      req.retryTimer = null;
+    }
+    if (req.cleanupTimer) {
+      clearTimeout(req.cleanupTimer);
+      req.cleanupTimer = null;
+    }
+    for (const tagHex of req.eciesTags) {
+      this.clearPendingEciesReply(tagHex);
+    }
+    this.pendingLeaseSetRequests.delete(targetHex);
+  }
+
+  private scheduleLeaseSetRetry(req: PendingLeaseSetRequest): void {
+    if (req.retryTimer) {
+      return;
+    }
+    req.retryTimer = setTimeout(() => {
+      req.retryTimer = null;
+      this.tryNextLeaseSetLookup(req.targetHash);
+    }, LEASESET_RETRY_DELAY_MS);
+  }
+
+  private cleanupPendingLeaseSetRequests(): void {
+    for (const [targetHex, req] of this.pendingLeaseSetRequests.entries()) {
+      if (this.shouldCleanupLeaseSetRequest(req)) {
+        this.clearPendingLeaseSetRequest(targetHex);
+      }
+    }
+  }
+
+  private clearPendingEciesReply(tagHex: string): void {
+    this.pendingEciesReplies.delete(tagHex);
+    for (const req of this.pendingLeaseSetRequests.values()) {
+      req.eciesTags.delete(tagHex);
+    }
+  }
+
+  private cleanupPendingEciesReplies(): void {
+    const now = Date.now();
+    for (const [tagHex, pending] of this.pendingEciesReplies.entries()) {
+      if (now - pending.createdAt >= ECIES_REPLY_TTL_MS) {
+        this.clearPendingEciesReply(tagHex);
+      }
+    }
+  }
+
+  private async ensureLeaseSetReplyTunnel(): Promise<{ tunnelId: number; gatewayHash: Buffer } | null> {
+    if (!this.tunnelManager || !this.routerInfo) return null;
+
+    let tunnel = this.tunnelManager
+      .getInboundTunnels()
+      .find((candidate) => candidate.hops.length === 0 && candidate.gateway.getRouterHash().equals(this.routerInfo!.getRouterHash()));
+
+    if (!tunnel) {
+      tunnel = (await this.tunnelManager.buildTunnel(TunnelType.INBOUND, 0)) ?? undefined;
+    }
+
+    if (!tunnel) return null;
+
+    return {
+      tunnelId: tunnel.id,
+      gatewayHash: tunnel.gateway.getRouterHash()
+    };
+  }
+
+  private shouldCleanupLeaseSetRequest(req: PendingLeaseSetRequest): boolean {
+    return Date.now() >= req.expiresAt || req.attempts >= MAX_LEASESET_FLOODFILLS_PER_REQUEST;
   }
 
   async buildInboundTunnel(hops = 3): Promise<ReturnType<TunnelManager['buildTunnel']>> {
