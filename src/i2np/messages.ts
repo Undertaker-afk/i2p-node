@@ -397,7 +397,7 @@ export class I2NPMessages {
       if (deliveryFlag & 0x80) { // delay
         cloveOffset += 4;
       }
-      const deliveryType = (deliveryFlag >> 1) & 0x03;
+      const deliveryType = (deliveryFlag >> 5) & 0x03;
       if (deliveryType === 1 || deliveryType === 2) { // Destination or Router
         cloveOffset += 32;
       } else if (deliveryType === 3) { // Tunnel
