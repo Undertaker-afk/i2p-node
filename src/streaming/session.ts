@@ -158,7 +158,9 @@ export class StreamingManager {
   private async ensureOutboundTunnel(): Promise<Tunnel | null> {
     const existing = this.tunnelManager.getOutboundTunnels()[0];
     if (existing) return existing;
-    return this.tunnelManager.buildTunnel(TunnelType.OUTBOUND, 1);
+    // Use zero-hop tunnel for immediate availability - multi-hop tunnels require
+    // waiting for tunnelBuilt event since buildTunnel returns null until built
+    return this.tunnelManager.buildTunnel(TunnelType.OUTBOUND, 0);
   }
 }
 

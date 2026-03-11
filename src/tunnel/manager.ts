@@ -123,6 +123,9 @@ export class TunnelManager extends EventEmitter {
       this.pendingBuilds.set(replyMessageId, buildRequest);
       this.pendingTunnels.set(tunnelId, tunnel);
       await this.sendTunnelBuildMessage(tunnel, hops);
+      // Return null for multi-hop tunnels - callers must wait for 'tunnelBuilt' event
+      // before using the tunnel. The tunnel is moved to this.tunnels upon successful build.
+      return null;
     } else {
       this.tunnels.set(tunnelId, tunnel);
       this.emit('tunnelBuilt', { tunnelId, type, numHops });
@@ -250,6 +253,15 @@ export class TunnelManager extends EventEmitter {
     const requestTime = Math.floor(Date.now() / 60000) >>> 0;
     clear.writeUInt32BE(requestTime, pos); pos += 4;
     clear.writeUInt32BE(TunnelManager.TUNNEL_BUILD_EXPIRATION_S, pos); pos += 4;
+
+    // replyMessageId (replyToken)
+    const replyMessageId = this.getPendingBuildMessageId(tunnel.id);
+    clear.writeUInt32BE(replyMessageId, pos); pos += 4;
+    // replyGateway (local router hash)
+    const replyGateway = this.localRouterInfo.getRouterHash();
+    Buffer.from(replyGateway).copy(clear, pos); pos += 32;
+    // replyTunnelId (usually 0)
+    clear.writeUInt32BE(0, pos); pos += 4;
 
     // sendMsgID: use tunnel id as a stable local correlation id
     clear.writeUInt32BE(tunnel.id >>> 0, pos); pos += 4;

@@ -46,7 +46,8 @@ interface PendingLeaseSetRequest {
   createdAt: number;
   candidateFloodfills: string[];
   eciesTags: Set<string>;
-  retryTimer: NodeJS.Timeout | null;
+  retryTimer: NodeJS.Timeout | null;  // For retry delay (2.5s)
+  cleanupTimer: NodeJS.Timeout | null;  // For request timeout cleanup (15s)
 }
 
 interface PendingEciesReply {
@@ -1021,19 +1022,17 @@ export class I2PRouter extends EventEmitter {
 
     // Multi-hop inbound tunnels carry encrypted 1028-byte tunnel messages.
     const candidate = message.payload.length === 1028 ? message.payload : tunnelPayload;
-    let fragment: Buffer | null = null;
+    let current = candidate;
+    // Decrypt each layer in order (gateway → endpoint)
     for (const hop of tunnel.hops) {
-      const unwrapped = decryptTunnelMessage(hop.tunnelId, hop.layerKey, candidate);
-      if (unwrapped) {
-        fragment = Buffer.from(unwrapped.fragment);
-        break;
+      const unwrapped = decryptTunnelMessage(hop.tunnelId, hop.layerKey, current);
+      if (!unwrapped) {
+        logger.debug('Failed to decrypt layer for hop', undefined, 'Router');
+        return;
       }
+      current = Buffer.from(unwrapped.fragment);
     }
-
-    if (!fragment) {
-      logger.debug('Failed to decrypt multi-hop tunnel message', undefined, 'Router');
-      return;
-    }
+    const fragment = current;
 
     try {
       const inner = I2NPMessages.parseMessage(fragment);
@@ -1330,11 +1329,20 @@ export class I2PRouter extends EventEmitter {
 
     let next: RouterInfo | undefined;
     while (req.candidateFloodfills.length > 0 && !next) {
-      const candidateHash = req.candidateFloodfills.shift()!;
-      if (req.excluded.has(candidateHash)) continue;
+      const candidateHash = req.candidateFloodfills[0]; // Peek at first candidate
+      if (!candidateHash || req.excluded.has(candidateHash)) {
+        req.candidateFloodfills.shift(); // Skip and remove excluded/invalid
+        continue;
+      }
       const candidateInfo = this.netDb.lookupRouterInfo(Buffer.from(candidateHash, 'hex'));
       if (candidateInfo) {
         next = candidateInfo;
+        req.candidateFloodfills.shift(); // Only remove after successfully obtaining RouterInfo
+      } else {
+        // RouterInfo not yet available - don't discard this candidate.
+        // Wait for routerInfoStored event to retry.
+        logger.debug(`Deferred LeaseSet lookup: ${candidateHash.slice(0, 16)}... not in NetDb yet`, undefined, 'Router');
+        return;
       }
     }
 
@@ -1521,7 +1529,8 @@ export class I2PRouter extends EventEmitter {
       createdAt: Date.now(),
       candidateFloodfills: [],
       eciesTags: new Set(),
-      retryTimer: setTimeout(() => {
+      retryTimer: null,
+      cleanupTimer: setTimeout(() => {
         this.clearPendingLeaseSetRequest(targetHex);
       }, timeoutMs)
     };
@@ -1533,6 +1542,10 @@ export class I2PRouter extends EventEmitter {
     if (req.retryTimer) {
       clearTimeout(req.retryTimer);
       req.retryTimer = null;
+    }
+    if (req.cleanupTimer) {
+      clearTimeout(req.cleanupTimer);
+      req.cleanupTimer = null;
     }
     for (const tagHex of req.eciesTags) {
       this.clearPendingEciesReply(tagHex);
