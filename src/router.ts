@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { EventEmitter } from 'events';
 import { gunzipSync, gzipSync } from 'zlib';
 import { Crypto } from './crypto/index.js';
@@ -8,6 +9,7 @@ import { parseI2PRouterInfo } from './data/router-info-i2p.js';
 import { I2NPMessages, I2NPMessageType } from './i2np/messages.js';
 import { NetworkDatabase } from './netdb/index.js';
 import { TunnelManager, TunnelType } from './tunnel/manager.js';
+import { decryptTunnelMessage } from './tunnel/message.js';
 import { PeerProfileManager } from './peer/profiles.js';
 import { NTCP2Transport } from './transport/ntcp2.js';
 import { SSU2Transport } from './transport/ssu2.js';
@@ -632,9 +634,11 @@ export class I2PRouter extends EventEmitter {
         this.handleTunnelMessage(sessionId, message);
         break;
       case I2NPMessageType.TUNNEL_BUILD:
+      case I2NPMessageType.VARIABLE_TUNNEL_BUILD:
         this.handleTunnelBuild(sessionId, message);
         break;
       case I2NPMessageType.TUNNEL_BUILD_REPLY:
+      case I2NPMessageType.VARIABLE_TUNNEL_BUILD_REPLY:
         this.handleTunnelBuildReply(sessionId, message);
         break;
       default:
@@ -677,12 +681,14 @@ export class I2PRouter extends EventEmitter {
             this.ntcp2.send(sessionId, dsWire);
           }
         } else {
-          // Reply through tunnel — wrap in TunnelGateway
-          // For now send directly to the session; full tunnel routing is TODO
-          this.ntcp2.send(sessionId, dsWire);
+          this.sendWireViaReplyTunnel(_replyGateway, replyTunnelId, dsWire, sessionId).catch((err) => {
+            logger.debug(`sendWireViaReplyTunnel failed: ${(err as Error).message}`, undefined, 'Router');
+          });
         }
-        this.stats.messagesSent++;
-        this.stats.bytesSent += dsWire.length;
+        if (replyTunnelId === 0) {
+          this.stats.messagesSent++;
+          this.stats.bytesSent += dsWire.length;
+        }
       }
     }
 
@@ -987,16 +993,44 @@ export class I2PRouter extends EventEmitter {
 
     const tunnelId = message.payload.readUInt32BE(0);
     const tunnel = this.tunnelManager.getTunnel(tunnelId);
-    // TODO: Extend this once multi-hop tunnel message decryption/routing is implemented.
-    if (!tunnel || tunnel.type !== TunnelType.INBOUND || tunnel.hops.length !== 0) {
+    if (!tunnel || tunnel.type !== TunnelType.INBOUND) {
+      return;
+    }
+
+    const tunnelPayload = message.payload.subarray(4);
+
+    // Zero-hop inbound tunnels carry a direct inner I2NP message.
+    if (tunnel.hops.length === 0) {
+      try {
+        const inner = I2NPMessages.parseMessage(tunnelPayload);
+        this.handleI2NPMessage(sessionId, inner);
+      } catch (err) {
+        logger.debug(`Failed to unwrap zero-hop tunnel message: ${(err as Error).message}`, undefined, 'Router');
+      }
+      return;
+    }
+
+    // Multi-hop inbound tunnels carry encrypted 1028-byte tunnel messages.
+    const candidate = message.payload.length === 1028 ? message.payload : tunnelPayload;
+    let fragment: Buffer | null = null;
+    for (const hop of tunnel.hops) {
+      const unwrapped = decryptTunnelMessage(hop.tunnelId, hop.layerKey, candidate);
+      if (unwrapped) {
+        fragment = Buffer.from(unwrapped.fragment);
+        break;
+      }
+    }
+
+    if (!fragment) {
+      logger.debug('Failed to decrypt multi-hop tunnel message', undefined, 'Router');
       return;
     }
 
     try {
-      const inner = I2NPMessages.parseMessage(message.payload.subarray(4));
+      const inner = I2NPMessages.parseMessage(fragment);
       this.handleI2NPMessage(sessionId, inner);
     } catch (err) {
-      logger.debug(`Failed to unwrap zero-hop tunnel message: ${(err as Error).message}`, undefined, 'Router');
+      logger.debug(`Failed to parse multi-hop tunnel fragment: ${(err as Error).message}`, undefined, 'Router');
     }
   }
 
@@ -1005,6 +1039,9 @@ export class I2PRouter extends EventEmitter {
   }
 
   private handleTunnelBuildReply(sessionId: string, message: ReturnType<typeof I2NPMessages.parseMessage>): void {
+    if (message.type === I2NPMessageType.VARIABLE_TUNNEL_BUILD_REPLY && this.tunnelManager) {
+      this.tunnelManager.handleVariableTunnelBuildReply(message.uniqueId, message.payload);
+    }
     this.emit('tunnelBuildReply', { sessionId, message });
   }
 
@@ -1042,6 +1079,23 @@ export class I2PRouter extends EventEmitter {
       this.stats.tunnelBuildSuccesses++;
       this.emit('tunnelBuilt', { tunnelId, type });
       this.updateStats();
+    });
+
+    this.tunnelManager.on('sendTunnelBuild', async ({ firstHop, messageId, records }) => {
+      if (!this.ntcp2) return;
+      try {
+        const endpoint = this.getNtcpEndpoint(firstHop);
+        if (!endpoint) return;
+        await this.ntcp2.connect(endpoint.host, endpoint.port, firstHop);
+        const sessionId = `${endpoint.host}:${endpoint.port}`;
+        const build = I2NPMessages.createVariableTunnelBuild(records, messageId);
+        const wire = I2NPMessages.serializeMessage(build);
+        this.ntcp2.send(sessionId, wire);
+        this.stats.messagesSent++;
+        this.stats.bytesSent += wire.length;
+      } catch (err) {
+        logger.debug(`Failed to send tunnel build: ${(err as Error).message}`, undefined, 'Tunnel');
+      }
     });
 
     this.tunnelManager.on('tunnelBuildFailed', ({ tunnelId }) => {
@@ -1343,6 +1397,62 @@ export class I2PRouter extends EventEmitter {
     // interoperable with stock routers yet.
   }
 
+
+  private async sendWireViaReplyTunnel(
+    replyGatewayHash: Buffer | null,
+    replyTunnelId: number,
+    wire: Buffer,
+    fallbackSessionId: string
+  ): Promise<void> {
+    if (!this.ntcp2 || !this.tunnelManager || !replyGatewayHash) {
+      if (this.ntcp2) this.ntcp2.send(fallbackSessionId, wire);
+      return;
+    }
+
+    const tunnelHeader = Buffer.alloc(4);
+    tunnelHeader.writeUInt32BE(replyTunnelId >>> 0, 0);
+    const gatewayMsgWire = I2NPMessages.serializeMessage({
+      type: I2NPMessageType.TUNNEL_GATEWAY,
+      uniqueId: crypto.randomBytes(4).readUInt32BE(0),
+      expiration: Date.now() + 30000,
+      payload: Buffer.concat([tunnelHeader, wire])
+    });
+
+    const outbound = this.tunnelManager.getOutboundTunnels()[0];
+    if (!outbound) {
+      this.ntcp2.send(fallbackSessionId, wire);
+      return;
+    }
+
+    if (outbound.hops.length === 0) {
+      const gatewaySessionId = this.ntcp2.findSessionIdByRouterHash(replyGatewayHash);
+      this.ntcp2.send(gatewaySessionId ?? fallbackSessionId, gatewayMsgWire);
+      this.stats.messagesSent++;
+      this.stats.bytesSent += gatewayMsgWire.length;
+      return;
+    }
+
+    const firstHop = outbound.hops[0].routerInfo;
+    const endpoint = this.getNtcpEndpoint(firstHop);
+    if (!endpoint) {
+      this.ntcp2.send(fallbackSessionId, wire);
+      return;
+    }
+
+    await this.ntcp2.connect(endpoint.host, endpoint.port, firstHop);
+    const firstHopSession = `${endpoint.host}:${endpoint.port}`;
+    const encrypted = this.tunnelManager.encryptForTunnel(outbound.id, gatewayMsgWire)[0];
+    const outer = I2NPMessages.serializeMessage({
+      type: I2NPMessageType.TUNNEL_DATA,
+      uniqueId: crypto.randomBytes(4).readUInt32BE(0),
+      expiration: Date.now() + 30000,
+      payload: encrypted
+    });
+    this.ntcp2.send(firstHopSession, outer);
+    this.stats.messagesSent++;
+    this.stats.bytesSent += outer.length;
+  }
+
   private sendDatabaseLookupReply(
     sessionId: string,
     replyGatewayHash: Buffer,
@@ -1362,7 +1472,7 @@ export class I2PRouter extends EventEmitter {
       lengthBuf.writeUInt32BE(body.length);
       replyMessage = {
         type: I2NPMessageType.GARLIC,
-        uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+        uniqueId: crypto.randomBytes(4).readUInt32BE(0),
         expiration: Date.now() + 30000,
         payload: Buffer.concat([lengthBuf, body])
       };
@@ -1374,7 +1484,7 @@ export class I2PRouter extends EventEmitter {
       tunnelHeader.writeUInt32BE(replyTunnelId);
       wire = I2NPMessages.serializeMessage({
         type: I2NPMessageType.TUNNEL_GATEWAY,
-        uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+        uniqueId: crypto.randomBytes(4).readUInt32BE(0),
         expiration: Date.now() + 30000,
         payload: Buffer.concat([tunnelHeader, wire])
       });

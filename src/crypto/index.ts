@@ -5,6 +5,13 @@ import { chacha20poly1305 } from '@noble/ciphers/chacha';
 import { randomBytes, createCipheriv, createDecipheriv } from 'crypto';
 import { siphash } from 'bsip';
 
+
+export interface NoiseNState {
+  h: Buffer;
+  ck: Buffer;
+  key: Buffer;
+}
+
 export interface KeyPair {
   privateKey: Uint8Array;
   publicKey: Uint8Array;
@@ -150,6 +157,30 @@ export class Crypto {
     return Buffer.from(this.decryptChaCha20Poly1305(sessionKey, nonce, ciphertext, sessionTag));
   }
 
+
+  static initNoiseNState(remoteStaticPublicKey: Uint8Array): NoiseNState {
+    if (remoteStaticPublicKey.length !== 32) {
+      throw new Error('Noise_N remote static public key must be 32 bytes');
+    }
+    const protocolHash = Buffer.from(this.sha256(this.NOISE_N_PROTOCOL_NAME));
+    const h = Buffer.from(this.sha256(Buffer.concat([protocolHash, Buffer.from(remoteStaticPublicKey)])));
+    return {
+      h,
+      ck: Buffer.from(protocolHash),
+      key: Buffer.alloc(32)
+    };
+  }
+
+  static mixHash(state: NoiseNState, data: Uint8Array): void {
+    state.h = Buffer.from(this.sha256(Buffer.concat([state.h, Buffer.from(data)])));
+  }
+
+  static mixKey(state: NoiseNState, inputKeyMaterial: Uint8Array): void {
+    const derived = Buffer.from(this.hkdf(state.ck, inputKeyMaterial, new Uint8Array(0), 64));
+    state.ck = derived.subarray(0, 32);
+    state.key = derived.subarray(32, 64);
+  }
+
   static encryptNoiseNGarlicReply(
     recipientStaticPublicKey: Uint8Array,
     plaintext: Uint8Array
@@ -202,15 +233,12 @@ export class Crypto {
     ephemeralPublicKey: Buffer,
     sharedSecret: Uint8Array
   ): { h: Buffer; key: Buffer } {
-    let h = Buffer.from(this.sha256(this.NOISE_N_PROTOCOL_NAME));
-    const ck = Buffer.from(h);
-    h = Buffer.from(this.sha256(Buffer.concat([h, recipientStaticPublicKey])));
-    h = Buffer.from(this.sha256(Buffer.concat([h, ephemeralPublicKey])));
-
-    const derived = Buffer.from(this.hkdf(ck, sharedSecret, new Uint8Array(0), 64));
+    const state = this.initNoiseNState(recipientStaticPublicKey);
+    this.mixHash(state, ephemeralPublicKey);
+    this.mixKey(state, sharedSecret);
     return {
-      h,
-      key: derived.subarray(32, 64)
+      h: state.h,
+      key: state.key
     };
   }
 }
