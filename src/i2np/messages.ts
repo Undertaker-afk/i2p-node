@@ -11,7 +11,7 @@ export enum I2NPMessageType {
   VARIABLE_TUNNEL_BUILD = 23,
   VARIABLE_TUNNEL_BUILD_REPLY = 24,
   SHORT_TUNNEL_BUILD = 25,
-  SHORT_TUNNEL_BUILD_REPLY = 26
+  SHORT_TUNNEL_BUILD_REPLY = 26,
 }
 
 
@@ -121,7 +121,8 @@ export class I2NPMessages {
   }
 
   static createVariableTunnelBuild(
-    records: Buffer[]
+    records: Buffer[],
+    uniqueId?: number
   ): I2NPMessage {
     const recordCount = Buffer.alloc(1);
     recordCount.writeUInt8(records.length);
@@ -133,7 +134,7 @@ export class I2NPMessages {
 
     return {
       type: I2NPMessageType.VARIABLE_TUNNEL_BUILD,
-      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      uniqueId: uniqueId ?? Math.floor(Math.random() * 0xFFFFFFFF),
       expiration: Date.now() + 60000,
       payload
     };
@@ -237,19 +238,20 @@ export class I2NPMessages {
   }
 
   static createTunnelBuild(
-    records: Buffer[]
+    records: Buffer[],
+    uniqueId?: number
   ): I2NPMessage {
     const recordCount = Buffer.alloc(1);
     recordCount.writeUInt8(records.length);
-    
+
     const payload = Buffer.concat([
       recordCount,
       ...records
     ]);
-    
+
     return {
       type: I2NPMessageType.TUNNEL_BUILD,
-      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      uniqueId: uniqueId ?? Math.floor(Math.random() * 0xFFFFFFFF),
       expiration: Date.now() + 60000,
       payload
     };
