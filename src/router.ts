@@ -632,9 +632,11 @@ export class I2PRouter extends EventEmitter {
         this.handleTunnelMessage(sessionId, message);
         break;
       case I2NPMessageType.TUNNEL_BUILD:
+      case I2NPMessageType.VARIABLE_TUNNEL_BUILD:
         this.handleTunnelBuild(sessionId, message);
         break;
       case I2NPMessageType.TUNNEL_BUILD_REPLY:
+      case I2NPMessageType.VARIABLE_TUNNEL_BUILD_REPLY:
         this.handleTunnelBuildReply(sessionId, message);
         break;
       default:
@@ -1005,6 +1007,9 @@ export class I2PRouter extends EventEmitter {
   }
 
   private handleTunnelBuildReply(sessionId: string, message: ReturnType<typeof I2NPMessages.parseMessage>): void {
+    if (message.type === I2NPMessageType.VARIABLE_TUNNEL_BUILD_REPLY && this.tunnelManager) {
+      this.tunnelManager.handleVariableTunnelBuildReply(message.payload);
+    }
     this.emit('tunnelBuildReply', { sessionId, message });
   }
 
@@ -1042,6 +1047,23 @@ export class I2PRouter extends EventEmitter {
       this.stats.tunnelBuildSuccesses++;
       this.emit('tunnelBuilt', { tunnelId, type });
       this.updateStats();
+    });
+
+    this.tunnelManager.on('sendTunnelBuild', async ({ firstHop, records }) => {
+      if (!this.ntcp2) return;
+      try {
+        const endpoint = this.getNtcpEndpoint(firstHop);
+        if (!endpoint) return;
+        await this.ntcp2.connect(endpoint.host, endpoint.port, firstHop);
+        const sessionId = `${endpoint.host}:${endpoint.port}`;
+        const build = I2NPMessages.createVariableTunnelBuild(records);
+        const wire = I2NPMessages.serializeMessage(build);
+        this.ntcp2.send(sessionId, wire);
+        this.stats.messagesSent++;
+        this.stats.bytesSent += wire.length;
+      } catch (err) {
+        logger.debug(`Failed to send tunnel build: ${(err as Error).message}`, undefined, 'Tunnel');
+      }
     });
 
     this.tunnelManager.on('tunnelBuildFailed', ({ tunnelId }) => {

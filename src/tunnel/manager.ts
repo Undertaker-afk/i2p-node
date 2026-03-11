@@ -16,8 +16,10 @@ export interface TunnelHop {
   tunnelId: number;
   layerKey: Uint8Array;
   ivKey: Uint8Array;
-  replyKey?: Uint8Array;
+  replyKey: Uint8Array;
+  replyIV: Uint8Array;
 }
+
 
 export interface Tunnel {
   id: number;
@@ -80,7 +82,8 @@ export class TunnelManager extends EventEmitter {
         tunnelId: this.nextTunnelId++,
         layerKey: Crypto.randomBytes(32),
         ivKey: Crypto.randomBytes(32),
-        replyKey: index === 0 ? Crypto.randomBytes(32) : undefined
+        replyKey: Crypto.randomBytes(32),
+        replyIV: Crypto.randomBytes(16)
       })));
     }
     
@@ -109,12 +112,11 @@ export class TunnelManager extends EventEmitter {
       messagesReceived: 0
     };
 
-    // TODO: Implement full ECIES-X25519 build messages over the network.
-    // For now we mark the tunnel as built locally without sending records.
     // Zero-hop tunnels are fully local and intentionally skip network build records.
-    // await this.sendTunnelBuildMessage(tunnel, hops);
-    
     this.tunnels.set(tunnelId, tunnel);
+    if (hops.length > 0) {
+      await this.sendTunnelBuildMessage(tunnel, hops);
+    }
     this.emit('tunnelBuilt', { tunnelId, type, numHops });
     
     return tunnel;
@@ -151,68 +153,92 @@ export class TunnelManager extends EventEmitter {
   }
 
   private async sendTunnelBuildMessage(tunnel: Tunnel, hops: TunnelHop[]): Promise<void> {
-    const records: Buffer[] = [];
-    
-    for (let i = 0; i < hops.length; i++) {
-      const hop = hops[i];
+    const records: Buffer[] = hops.map((hop, i) => {
       const nextHop = i < hops.length - 1 ? hops[i + 1] : null;
-      
-      const record = this.buildTunnelRecord(
-        hop,
-        nextHop,
-        i === 0 ? tunnel.id : 0
-      );
-      
-      records.push(record);
+      const clear = this.buildTunnelBuildRequestRecord(tunnel, hop, nextHop, i);
+      const encrypted = this.encryptBuildRecordForHop(hop, clear);
+      const toPeer = Buffer.from(hop.routerHash).subarray(0, 16);
+      return Buffer.concat([toPeer, encrypted]);
+    });
+
+    // garlic/tunnel build record peeling with per-hop reply keys (i2pd style)
+    for (let i = hops.length - 2; i >= 0; i--) {
+      for (let j = i + 1; j < records.length; j++) {
+        const rec = records[j];
+        const peeled = Crypto.aesEncryptCBC(rec.subarray(16), hops[i].replyKey, hops[i].replyIV);
+        records[j] = Buffer.concat([rec.subarray(0, 16), peeled]);
+      }
     }
-    
+
     this.emit('sendTunnelBuild', {
       tunnelId: tunnel.id,
       firstHop: hops[0].routerInfo,
+      messageId: tunnel.id,
       records
     });
   }
 
-  private buildTunnelRecord(
+  private buildTunnelBuildRequestRecord(
+    tunnel: Tunnel,
     hop: TunnelHop,
     nextHop: TunnelHop | null,
-    replyTunnelId: number
+    hopIndex: number
   ): Buffer {
-    const record = Buffer.alloc(528);
+    const clear = Buffer.alloc(464);
     let pos = 0;
-    
-    record.writeUInt8(0, pos++);
-    
-    record.set(hop.routerHash, pos);
-    pos += 32;
-    
-    record.writeUInt32BE(hop.tunnelId, pos);
-    pos += 4;
-    
-    record.set(hop.layerKey, pos);
-    pos += 32;
-    
-    record.set(hop.ivKey, pos);
-    pos += 32;
-    
-    if (nextHop) {
-      record.writeUInt32BE(nextHop.tunnelId, pos);
-      pos += 4;
-      record.set(nextHop.routerHash, pos);
-      pos += 32;
-    } else {
-      record.writeUInt32BE(0, pos);
-      pos += 4;
-      record.fill(0, pos, pos + 32);
-      pos += 32;
+
+    const receiveTunnelId = hop.tunnelId >>> 0;
+    clear.writeUInt32BE(receiveTunnelId, pos); pos += 4;
+
+    const nextTunnelId = nextHop ? nextHop.tunnelId >>> 0 : 0;
+    clear.writeUInt32BE(nextTunnelId, pos); pos += 4;
+
+    const nextIdent = nextHop ? Buffer.from(nextHop.routerHash) : Buffer.alloc(32);
+    nextIdent.copy(clear, pos); pos += 32;
+
+    Buffer.from(hop.layerKey).copy(clear, pos); pos += 32;
+    Buffer.from(hop.ivKey).copy(clear, pos); pos += 32;
+    Buffer.from(hop.replyKey).copy(clear, pos); pos += 32;
+    Buffer.from(hop.replyIV).copy(clear, pos); pos += 16;
+
+    let flag = 0;
+    if (hopIndex === 0) flag |= 0x80;
+    if (!nextHop) flag |= 0x40;
+    clear.writeUInt8(flag, pos); pos += 1;
+
+    clear.fill(0x00, pos, pos + 3); pos += 3;
+
+    const requestTime = Math.floor(Date.now() / 60000) >>> 0;
+    clear.writeUInt32BE(requestTime, pos); pos += 4;
+    clear.writeUInt32BE(600, pos); pos += 4;
+
+    // sendMsgID: use tunnel id as a stable local correlation id
+    clear.writeUInt32BE(tunnel.id >>> 0, pos); pos += 4;
+
+    if (pos < clear.length) {
+      Buffer.from(Crypto.randomBytes(clear.length - pos)).copy(clear, pos);
     }
-    
-    record.writeUInt32BE(replyTunnelId, pos);
-    pos += 4;
-    
-    record.fill(0, pos, 528);
-    
-    return record;
+
+    return clear;
+  }
+
+  private encryptBuildRecordForHop(hop: TunnelHop, clear: Buffer): Buffer {
+    const staticPub = Buffer.from(hop.routerInfo.identity.encryptionPublicKey);
+    if (staticPub.length !== 32) {
+      throw new Error('Hop static encryption key must be 32 bytes (X25519)');
+    }
+
+    const ephemeral = Crypto.generateEphemeralKeyPair();
+    const state = Crypto.initNoiseNState(staticPub);
+    Crypto.mixHash(state, Buffer.from(ephemeral.publicKey));
+    const shared = Crypto.x25519DiffieHellman(ephemeral.privateKey, staticPub);
+    Crypto.mixKey(state, shared);
+
+    const nonce = Buffer.alloc(12);
+    const ciphertext = Buffer.from(Crypto.encryptChaCha20Poly1305(state.key, nonce, clear, state.h));
+    Crypto.mixHash(state, ciphertext);
+
+    return Buffer.concat([Buffer.from(ephemeral.publicKey), ciphertext]);
   }
 
   handleTunnelBuildReply(messageId: number, success: boolean): void {
@@ -227,6 +253,20 @@ export class TunnelManager extends EventEmitter {
     } else {
       this.emit('tunnelBuildSuccess', { tunnelId: buildRequest.tunnelId });
     }
+  }
+
+
+  handleVariableTunnelBuildReply(reply: Buffer): void {
+    if (reply.length < 1) return;
+    const count = reply.readUInt8(0);
+    if (reply.length < 1 + count * 528) return;
+
+    // Minimal acceptance path: mark all currently-pending builds as successful.
+    // Full per-record decrypt/retcode validation is not available yet.
+    for (const pending of this.pendingBuilds.values()) {
+      this.emit('tunnelBuildSuccess', { tunnelId: pending.tunnelId });
+    }
+    this.pendingBuilds.clear();
   }
 
   getTunnel(tunnelId: number): Tunnel | undefined {

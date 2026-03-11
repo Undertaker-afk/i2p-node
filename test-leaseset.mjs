@@ -4,7 +4,19 @@
  */
 import { I2PRouter } from './dist/router.js';
 import { LogLevel } from './dist/utils/logger.js';
+import { rm } from 'fs/promises';
 const TIMEOUT_MS = 120_000;
+
+const DATA_DIR = './test-i2p-data';
+
+async function cleanupDataDir() {
+  try {
+    await rm(DATA_DIR, { recursive: true, force: true });
+    console.log('[TEST] Cleaned up test-i2p-data folder');
+  } catch (err) {
+    console.warn(`[TEST] Failed to cleanup test-i2p-data: ${err.message}`);
+  }
+}
 async function main() {
   const router = new I2PRouter({
     host: '0.0.0.0',
@@ -14,7 +26,7 @@ async function main() {
     isFloodfill: true,
     bandwidthClass: 'X',
     netId: 2,
-    dataDir: './test-i2p-data',
+    dataDir: DATA_DIR,
     logLevel: LogLevel.DEBUG,
     enableWebUI: false,
   });
@@ -50,11 +62,12 @@ async function main() {
     await router.start();
   } catch (err) {
     console.error('[TEST] Failed to start router:', err.message);
+    await cleanupDataDir();
     process.exit(1);
   }
   console.log('[TEST] Router started. Waiting up to 120 seconds for LeaseSet...');
   // Poll every 2 seconds
-  const checkInterval = setInterval(() => {
+  const checkInterval = setInterval(async () => {
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
     const stats = router.getStats();
     const lsCount = netDb.getLeaseSetCount();
@@ -69,11 +82,12 @@ async function main() {
       clearInterval(checkInterval);
       console.log(`\n[TEST] SUCCESS: Received ${lsCount} LeaseSet(s) after ${elapsed}s`);
       router.stop();
+      await cleanupDataDir();
       process.exit(0);
     }
   }, 2000);
   // Timeout
-  setTimeout(() => {
+  setTimeout(async () => {
     clearInterval(checkInterval);
     const stats = router.getStats();
     const lsCount = netDb.getLeaseSetCount();
@@ -87,15 +101,18 @@ async function main() {
     if (lsCount > 0) {
       console.log(`[TEST] SUCCESS: Received ${lsCount} LeaseSet(s)`);
       router.stop();
+      await cleanupDataDir();
       process.exit(0);
     } else {
       console.log('[TEST] FAIL: No LeaseSets received within 120 seconds');
       router.stop();
+      await cleanupDataDir();
       process.exit(1);
     }
   }, TIMEOUT_MS);
 }
-main().catch((err) => {
+main().catch(async (err) => {
   console.error('[TEST] Unhandled error:', err);
+  await cleanupDataDir();
   process.exit(1);
 });
