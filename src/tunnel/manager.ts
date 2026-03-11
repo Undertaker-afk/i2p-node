@@ -467,7 +467,7 @@ export class TunnelManager extends EventEmitter {
     let wire = Buffer.from(msg);
     for (let i = tunnel.hops.length - 1; i >= 0; i--) {
       const hop = tunnel.hops[i];
-      wire = encryptTunnelMessage(hop.tunnelId, hop.layerKey, wire);
+      wire = encryptTunnelMessage(hop.tunnelId, hop.layerKey, wire) as Buffer<ArrayBuffer>;
     }
     return [wire];
   }

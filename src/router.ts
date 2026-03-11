@@ -854,6 +854,7 @@ export class I2PRouter extends EventEmitter {
             const storeMsg = I2NPMessages.createDatabaseStore(key, data, 0, ourHash);
             this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag);
             this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag).catch((err) => { logger.debug(`sendDatabaseLookupReply failed: ${(err as Error).message}`, undefined, 'Router'); });
+            replied = true;
           }
         }
       }
@@ -871,6 +872,7 @@ export class I2PRouter extends EventEmitter {
           const storeMsg = I2NPMessages.createDatabaseStore(key, lsData, 0, ourHash, ls.storeType);
           this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag);
           this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, storeMsg, eciesSessionKey, eciesSessionTag).catch((err) => { logger.debug(`sendDatabaseLookupReply failed: ${(err as Error).message}`, undefined, 'Router'); });
+          replied = true;
         }
       }
     }
@@ -884,8 +886,9 @@ export class I2PRouter extends EventEmitter {
         .map(ff => ff.getRouterHash());
       const ourHash = this.routerInfo!.getRouterHash();
       const searchReply = I2NPMessages.createDatabaseSearchReply(key, routerHashes, ourHash);
-      this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, searchReply, eciesSessionKey, eciesSessionTag);
       this.sendDatabaseLookupReply(sessionId, fromHash, replyTunnelId, searchReply, eciesSessionKey, eciesSessionTag).catch((err) => { logger.debug(`sendDatabaseLookupReply failed: ${(err as Error).message}`, undefined, 'Router'); });
+      replied = true;
+    }
 
     this.emit('databaseLookup', { sessionId, message });
   }
@@ -1638,9 +1641,8 @@ export class I2PRouter extends EventEmitter {
     };
   }
 
-  private shouldCleanu>= req.expiresAt boolean {
-    return Date.now() - req.createdAt >= LEASESET_REQUEST_TIMEOUT_MS
-      || req.attempts >= MAX_LEASESET_FLOODFILLS_PER_REQUEST;
+  private shouldCleanupLeaseSetRequest(req: PendingLeaseSetRequest): boolean {
+    return Date.now() >= req.expiresAt || req.attempts >= MAX_LEASESET_FLOODFILLS_PER_REQUEST;
   }
 
   async buildInboundTunnel(hops = 3): Promise<ReturnType<TunnelManager['buildTunnel']>> {
