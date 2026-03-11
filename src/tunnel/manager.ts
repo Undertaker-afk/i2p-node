@@ -310,10 +310,24 @@ export class TunnelManager extends EventEmitter {
       offset += 528;
     }
 
+    const maxIndex = pending.recordOrder.length > 0 ? Math.max(...pending.recordOrder) : -1;
+    if (maxIndex >= records.length) {
+      this.pendingBuilds.delete(messageId);
+      this.pendingTunnels.delete(pending.tunnelId);
+      this.emit('tunnelBuildFailed', { tunnelId: pending.tunnelId });
+      return;
+    }
+
     // reverse-peel to reveal each hop record status
     for (let i = pending.hopReplyKeys.length - 2; i >= 0; i--) {
       for (let j = i + 1; j < pending.hopReplyKeys.length; j++) {
         const recordIndex = pending.recordOrder[j] ?? j;
+        if (recordIndex < 0 || recordIndex >= records.length) {
+          this.pendingBuilds.delete(messageId);
+          this.pendingTunnels.delete(pending.tunnelId);
+          this.emit('tunnelBuildFailed', { tunnelId: pending.tunnelId });
+          return;
+        }
         const rec = records[recordIndex];
         const decrypted = Crypto.aesDecryptCBC(
           rec.subarray(16),
@@ -327,7 +341,15 @@ export class TunnelManager extends EventEmitter {
     let success = true;
     for (let i = 0; i < pending.hopReplyKeys.length; i++) {
       const recordIndex = pending.recordOrder[i] ?? i;
+      if (recordIndex < 0 || recordIndex >= records.length) {
+        success = false;
+        break;
+      }
       const record = records[recordIndex];
+      if (record.length < 528) {
+        success = false;
+        break;
+      }
       const retCode = record.readUInt8(527);
       if (retCode !== 0) {
         success = false;
@@ -377,12 +399,23 @@ export class TunnelManager extends EventEmitter {
 
   cleanupExpiredTunnels(): void {
     const now = Date.now();
-    
+
     for (const [id, tunnel] of this.tunnels.entries()) {
       if (tunnel.expiration < now) {
         this.tunnels.delete(id);
         this.emit('tunnelExpired', { tunnelId: id });
       }
+    }
+
+    for (const [id, tunnel] of this.pendingTunnels.entries()) {
+      if (tunnel.expiration >= now) continue;
+      this.pendingTunnels.delete(id);
+      for (const [messageId, pending] of this.pendingBuilds.entries()) {
+        if (pending.tunnelId === id) {
+          this.pendingBuilds.delete(messageId);
+        }
+      }
+      this.emit('tunnelBuildFailed', { tunnelId: id });
     }
   }
 

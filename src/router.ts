@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { EventEmitter } from 'events';
 import { gunzipSync, gzipSync } from 'zlib';
 import { Crypto } from './crypto/index.js';
@@ -680,7 +681,9 @@ export class I2PRouter extends EventEmitter {
             this.ntcp2.send(sessionId, dsWire);
           }
         } else {
-          void this.sendWireViaReplyTunnel(_replyGateway, replyTunnelId, dsWire, sessionId);
+          this.sendWireViaReplyTunnel(_replyGateway, replyTunnelId, dsWire, sessionId).catch((err) => {
+            logger.debug(`sendWireViaReplyTunnel failed: ${(err as Error).message}`, undefined, 'Router');
+          });
         }
         if (replyTunnelId === 0) {
           this.stats.messagesSent++;
@@ -1410,7 +1413,7 @@ export class I2PRouter extends EventEmitter {
     tunnelHeader.writeUInt32BE(replyTunnelId >>> 0, 0);
     const gatewayMsgWire = I2NPMessages.serializeMessage({
       type: I2NPMessageType.TUNNEL_GATEWAY,
-      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      uniqueId: crypto.randomBytes(4).readUInt32BE(0),
       expiration: Date.now() + 30000,
       payload: Buffer.concat([tunnelHeader, wire])
     });
@@ -1441,7 +1444,7 @@ export class I2PRouter extends EventEmitter {
     const encrypted = this.tunnelManager.encryptForTunnel(outbound.id, gatewayMsgWire)[0];
     const outer = I2NPMessages.serializeMessage({
       type: I2NPMessageType.TUNNEL_DATA,
-      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      uniqueId: crypto.randomBytes(4).readUInt32BE(0),
       expiration: Date.now() + 30000,
       payload: encrypted
     });
@@ -1469,7 +1472,7 @@ export class I2PRouter extends EventEmitter {
       lengthBuf.writeUInt32BE(body.length);
       replyMessage = {
         type: I2NPMessageType.GARLIC,
-        uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+        uniqueId: crypto.randomBytes(4).readUInt32BE(0),
         expiration: Date.now() + 30000,
         payload: Buffer.concat([lengthBuf, body])
       };
@@ -1481,7 +1484,7 @@ export class I2PRouter extends EventEmitter {
       tunnelHeader.writeUInt32BE(replyTunnelId);
       wire = I2NPMessages.serializeMessage({
         type: I2NPMessageType.TUNNEL_GATEWAY,
-        uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+        uniqueId: crypto.randomBytes(4).readUInt32BE(0),
         expiration: Date.now() + 30000,
         payload: Buffer.concat([tunnelHeader, wire])
       });
