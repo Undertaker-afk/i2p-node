@@ -73,7 +73,7 @@ export class TunnelManager extends EventEmitter {
 
   async buildTunnel(type: TunnelType, numHops = 3): Promise<Tunnel | null> {
     const tunnelId = this.nextTunnelId++;
-    const replyMessageId = Math.floor(Math.random() * 0xFFFFFFFF);
+    const replyMessageId = Buffer.from(Crypto.randomBytes(4)).readUInt32BE(0);
     const hops: TunnelHop[] = [];
     if (numHops > 0) {
       const hopRouters = this.selectHopRouters(numHops);
@@ -175,7 +175,9 @@ export class TunnelManager extends EventEmitter {
       records[order[i]] = Buffer.concat([toPeer, encrypted]);
     }
 
-    // garlic/tunnel build record peeling with per-hop reply keys (i2pd style)
+    // garlic/tunnel build record peeling with per-hop reply keys (i2pd style).
+    // We intentionally use each hop's configured replyIV directly for compatibility
+    // with the existing tunnel build/reply processing flow.
     for (let i = hops.length - 2; i >= 0; i--) {
       for (let j = i + 1; j < hops.length; j++) {
         const rec = records[order[j]];
