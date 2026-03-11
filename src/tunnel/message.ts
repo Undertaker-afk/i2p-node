@@ -13,8 +13,9 @@ export function encryptHop(data: Buffer, layerKey: Uint8Array, ivKey: Uint8Array
 }
 
 export function decryptHop(data: Buffer, layerKey: Uint8Array, ivKey: Uint8Array): Buffer {
-  const iv = Crypto.aesDecryptECB(data.subarray(0, 16), ivKey);
-  const decryptedData = Crypto.aesDecryptCBC(data.subarray(16), layerKey, iv);
+  const encryptedIV = data.subarray(0, 16);
+  const decryptedData = Crypto.aesDecryptCBC(data.subarray(16), layerKey, encryptedIV);
+  const iv = Crypto.aesDecryptECB(encryptedIV, ivKey);
   const result = Buffer.alloc(DATA_LEN);
   iv.copy(result, 0);
   decryptedData.copy(result, 16);

@@ -148,7 +148,7 @@ export class I2PRouter extends EventEmitter {
   }
 
   private async startSAM(): Promise<void> { this.sam = new SAMProtocol({ host: '127.0.0.1', port: this.options.samPort }); await this.sam.start(); }
-  private handleTransportMessage(sessionId: string, data: Buffer): void { this.stats.messagesSent++; this.stats.bytesReceived += data.length; try { this.handleI2NPMessage(sessionId, I2NPMessages.parseMessage(data)); } catch (err) { this.emit('error', { error: err, data }); } }
+  private handleTransportMessage(sessionId: string, data: Buffer): void { this.stats.messagesReceived++; this.stats.bytesReceived += data.length; try { this.handleI2NPMessage(sessionId, I2NPMessages.parseMessage(data)); } catch (err) { this.emit('error', { error: err, data }); } }
 
   private handleI2NPMessage(sessionId: string, message: any): void {
     switch (message.type) {
@@ -217,8 +217,15 @@ export class I2PRouter extends EventEmitter {
     if (data.length !== 1024) return;
     const { decryptHop } = await import('./tunnel/message.js'); let decrypted = data;
     for (let i = tunnel.hops.length - 1; i >= 0; i--) decrypted = decryptHop(decrypted, tunnel.hops[i].layerKey, tunnel.hops[i].ivKey);
-    const offset = decrypted.readUInt16BE(0); if (offset > 1022) return;
-    try { const frag = decrypted.subarray(offset + 2); if (frag.length < 3) return; const type = frag[0], size = frag.readUInt16BE(1); if (frag.length >= 3 + size) this.handleI2NPMessage(sessionId, I2NPMessages.parseMessage(frag.subarray(0, 3 + size) as any)); } catch (e) {} }
+    const offset = decrypted.readUInt16BE(0); if (offset > 1021) return;
+    try {
+      const deliveryFlag = decrypted[offset];
+      const size = decrypted.readUInt16BE(offset + 1);
+      if (decrypted.length >= offset + 3 + size) {
+        const innerI2NP = decrypted.subarray(offset + 3, offset + 3 + size);
+        this.handleI2NPMessage(sessionId, I2NPMessages.parseMessage(innerI2NP));
+      }
+    } catch (e) {} }
 
   private handleTunnelBuildReply(sessionId: string, message: any): void { if (this.tunnelManager) { const records = message.type === I2NPMessageType.VARIABLE_TUNNEL_BUILD_REPLY ? I2NPMessages.parseVariableTunnelBuildReply(message.payload) : null; if (records) this.tunnelManager.handleVariableTunnelBuildReply(message.uniqueId, records); } this.emit('tunnelBuildReply', { sessionId, message }); }
   private getNtcpEndpoint(ri: RouterInfo): { host: string; port: number } | null { const addr = ri.addresses.find(a => a.transportStyle.toUpperCase().startsWith('NTCP') && a.options.host && !a.options.host.includes(':') && a.options.s && a.options.i && a.options.port); if (!addr) return null; const host = addr.options.host.trim().replace(/^\[|\]$/g, ''), port = parseInt(addr.options.port, 10); return !host || isNaN(port) || port <= 0 || port > 65535 ? null : { host, port }; }
