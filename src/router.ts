@@ -1037,7 +1037,7 @@ export class I2PRouter extends EventEmitter {
 
   private handleTunnelBuildReply(sessionId: string, message: ReturnType<typeof I2NPMessages.parseMessage>): void {
     if (message.type === I2NPMessageType.VARIABLE_TUNNEL_BUILD_REPLY && this.tunnelManager) {
-      this.tunnelManager.handleVariableTunnelBuildReply(message.payload);
+      this.tunnelManager.handleVariableTunnelBuildReply(message.uniqueId, message.payload);
     }
     this.emit('tunnelBuildReply', { sessionId, message });
   }
@@ -1078,14 +1078,14 @@ export class I2PRouter extends EventEmitter {
       this.updateStats();
     });
 
-    this.tunnelManager.on('sendTunnelBuild', async ({ firstHop, records }) => {
+    this.tunnelManager.on('sendTunnelBuild', async ({ firstHop, messageId, records }) => {
       if (!this.ntcp2) return;
       try {
         const endpoint = this.getNtcpEndpoint(firstHop);
         if (!endpoint) return;
         await this.ntcp2.connect(endpoint.host, endpoint.port, firstHop);
         const sessionId = `${endpoint.host}:${endpoint.port}`;
-        const build = I2NPMessages.createVariableTunnelBuild(records);
+        const build = I2NPMessages.createVariableTunnelBuild(records, messageId);
         const wire = I2NPMessages.serializeMessage(build);
         this.ntcp2.send(sessionId, wire);
         this.stats.messagesSent++;

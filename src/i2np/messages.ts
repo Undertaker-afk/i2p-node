@@ -1,3 +1,5 @@
+import * as crypto from 'crypto';
+
 export enum I2NPMessageType {
   DATABASE_STORE = 1,
   DATABASE_LOOKUP = 2,
@@ -6,10 +8,10 @@ export enum I2NPMessageType {
   GARLIC = 11,
   TUNNEL_DATA = 18,
   TUNNEL_GATEWAY = 19,
-  TUNNEL_BUILD = 21,
-  TUNNEL_BUILD_REPLY = 22,
-  VARIABLE_TUNNEL_BUILD = 23,
-  VARIABLE_TUNNEL_BUILD_REPLY = 24,
+  TUNNEL_BUILD = 20,
+  TUNNEL_BUILD_REPLY = 21,
+  VARIABLE_TUNNEL_BUILD = 22,
+  VARIABLE_TUNNEL_BUILD_REPLY = 23,
   SHORT_TUNNEL_BUILD = 25,
   SHORT_TUNNEL_BUILD_REPLY = 26
 }
@@ -114,7 +116,7 @@ export class I2NPMessages {
     
     return {
       type: I2NPMessageType.DATABASE_STORE,
-      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      uniqueId: crypto.randomBytes(4).readUInt32BE(0),
       expiration: Date.now() + 60000,
       payload
     };
@@ -199,7 +201,7 @@ export class I2NPMessages {
 
     return {
       type: I2NPMessageType.DATABASE_LOOKUP,
-      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      uniqueId: crypto.randomBytes(4).readUInt32BE(0),
       expiration: Date.now() + 30000,
       payload
     };
@@ -218,19 +220,19 @@ export class I2NPMessages {
     
     return {
       type: I2NPMessageType.TUNNEL_BUILD,
-      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      uniqueId: crypto.randomBytes(4).readUInt32BE(0),
       expiration: Date.now() + 60000,
       payload
     };
   }
 
-  static createVariableTunnelBuild(records: Buffer[]): I2NPMessage {
+  static createVariableTunnelBuild(records: Buffer[], uniqueId?: number): I2NPMessage {
     const recordCount = Buffer.alloc(1);
     recordCount.writeUInt8(records.length);
 
     return {
       type: I2NPMessageType.VARIABLE_TUNNEL_BUILD,
-      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      uniqueId: uniqueId ?? crypto.randomBytes(4).readUInt32BE(0),
       expiration: Date.now() + 60000,
       payload: Buffer.concat([recordCount, ...records])
     };
@@ -250,7 +252,7 @@ export class I2NPMessages {
     
     return {
       type: I2NPMessageType.TUNNEL_DATA,
-      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      uniqueId: crypto.randomBytes(4).readUInt32BE(0),
       expiration: Date.now() + 30000,
       payload
     };
@@ -281,7 +283,7 @@ export class I2NPMessages {
 
     return {
       type: I2NPMessageType.DATABASE_SEARCH_REPLY,
-      uniqueId: Math.floor(Math.random() * 0xFFFFFFFF),
+      uniqueId: crypto.randomBytes(4).readUInt32BE(0),
       expiration: Date.now() + 30000,
       payload
     };

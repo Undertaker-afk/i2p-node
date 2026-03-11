@@ -57,6 +57,7 @@ export interface TunnelBuildRecord {
 
 export class TunnelManager extends EventEmitter {
   private tunnels: Map<number, Tunnel> = new Map();
+  private pendingTunnels: Map<number, Tunnel> = new Map();
   private pendingBuilds: Map<number, TunnelBuildRequest> = new Map();
   private netDb: NetworkDatabase;
   private localRouterInfo: RouterInfo;
@@ -90,22 +91,6 @@ export class TunnelManager extends EventEmitter {
       })));
     }
     
-    const buildRequest: TunnelBuildRequest = {
-      tunnelId,
-      replyMessageId,
-      hops: hops.map(h => ({
-        routerHash: h.routerHash,
-        tunnelId: h.tunnelId
-      })),
-      replyTunnelId: 0,
-      replyGateway: this.localRouterInfo.getRouterHash(),
-      recordOrder: [],
-      numRecords: 0,
-      hopReplyKeys: hops.map((h) => ({ replyKey: h.replyKey, replyIV: h.replyIV }))
-    };
-    
-    this.pendingBuilds.set(replyMessageId, buildRequest);
-    
     const tunnel: Tunnel = {
       id: tunnelId,
       type,
@@ -119,11 +104,27 @@ export class TunnelManager extends EventEmitter {
     };
 
     // Zero-hop tunnels are fully local and intentionally skip network build records.
-    this.tunnels.set(tunnelId, tunnel);
     if (hops.length > 0) {
+      const buildRequest: TunnelBuildRequest = {
+        tunnelId,
+        replyMessageId,
+        hops: hops.map(h => ({
+          routerHash: h.routerHash,
+          tunnelId: h.tunnelId
+        })),
+        replyTunnelId: 0,
+        replyGateway: this.localRouterInfo.getRouterHash(),
+        recordOrder: [],
+        numRecords: 0,
+        hopReplyKeys: hops.map((h) => ({ replyKey: h.replyKey, replyIV: h.replyIV }))
+      };
+      this.pendingBuilds.set(replyMessageId, buildRequest);
+      this.pendingTunnels.set(tunnelId, tunnel);
       await this.sendTunnelBuildMessage(tunnel, hops);
+    } else {
+      this.tunnels.set(tunnelId, tunnel);
+      this.emit('tunnelBuilt', { tunnelId, type, numHops });
     }
-    this.emit('tunnelBuilt', { tunnelId, type, numHops });
     
     return tunnel;
   }
@@ -191,9 +192,16 @@ export class TunnelManager extends EventEmitter {
     this.emit('sendTunnelBuild', {
       tunnelId: tunnel.id,
       firstHop: hops[0].routerInfo,
-      messageId: tunnel.id,
+      messageId: this.getPendingBuildMessageId(tunnel.id),
       records
     });
+  }
+
+  private getPendingBuildMessageId(tunnelId: number): number {
+    for (const [messageId, pending] of this.pendingBuilds.entries()) {
+      if (pending.tunnelId === tunnelId) return messageId;
+    }
+    return tunnelId;
   }
 
   private shuffleIndices(count: number): number[] {
@@ -283,14 +291,13 @@ export class TunnelManager extends EventEmitter {
   }
 
 
-  handleVariableTunnelBuildReply(reply: Buffer): void {
+  handleVariableTunnelBuildReply(messageId: number, reply: Buffer): void {
     if (reply.length < 1) return;
     const count = reply.readUInt8(0);
     if (reply.length < 1 + count * 528) return;
 
-    const entries = Array.from(this.pendingBuilds.entries());
-    if (entries.length === 0) return;
-    const [messageId, pending] = entries[0];
+    const pending = this.pendingBuilds.get(messageId);
+    if (!pending) return;
 
     const records: Buffer[] = [];
     let offset = 1;
@@ -326,8 +333,14 @@ export class TunnelManager extends EventEmitter {
 
     this.pendingBuilds.delete(messageId);
     if (success) {
-      this.emit('tunnelBuildSuccess', { tunnelId: pending.tunnelId });
+      const tunnel = this.pendingTunnels.get(pending.tunnelId);
+      if (tunnel) {
+        this.pendingTunnels.delete(pending.tunnelId);
+        this.tunnels.set(pending.tunnelId, tunnel);
+        this.emit('tunnelBuilt', { tunnelId: pending.tunnelId, type: tunnel.type, numHops: tunnel.hops.length });
+      }
     } else {
+      this.pendingTunnels.delete(pending.tunnelId);
       this.tunnels.delete(pending.tunnelId);
       this.emit('tunnelBuildFailed', { tunnelId: pending.tunnelId });
     }
