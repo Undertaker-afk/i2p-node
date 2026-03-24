@@ -250,6 +250,15 @@ export class NTCP2Transport extends EventEmitter {
     return !!session && session.state === 'established' && !session.socket.destroyed;
   }
 
+  /** Get the remote router hash for an established session by sessionId. */
+  getRouterHashBySessionId(sessionId: string): Buffer | null {
+    const session = this.sessions.get(sessionId);
+    if (session?.state === 'established' && session.remoteRouterHash) {
+      return session.remoteRouterHash;
+    }
+    return null;
+  }
+
   /** Find an established session by remote router hash. */
   findSessionIdByRouterHash(routerHash: Uint8Array): string | null {
     const target = Buffer.from(routerHash);
