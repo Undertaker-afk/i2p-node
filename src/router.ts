@@ -159,14 +159,16 @@ export class I2PRouter extends EventEmitter {
       });
     });
 
-    // Listen for LeaseSet lookup requests (type 0 = normal/any)
-    this.netDb.on('leaseSetLookup', ({ targetHash, floodfill }: { targetHash: Buffer; floodfill: RouterInfo }) => {
+    // Listen for LeaseSet lookup requests — supports lookupType (0=normal, 1=leaseSet-specific)
+    // and can query multiple floodfills per hash for better coverage.
+    this.netDb.on('leaseSetLookup', ({ targetHash, floodfill, lookupType }: { targetHash: Buffer; floodfill: RouterInfo; lookupType?: 0 | 1 }) => {
+      const lt = lookupType ?? 0;
       logger.debug(
-        `LeaseSet lookup for ${targetHash.toString('hex').slice(0, 16)}... via ${floodfill.getRouterHash().toString('hex').slice(0, 16)}...`,
+        `LeaseSet lookup (type=${lt}) for ${targetHash.toString('hex').slice(0, 16)}... via ${floodfill.getRouterHash().toString('hex').slice(0, 16)}...`,
         undefined,
         'Router'
       );
-      this.sendDatabaseLookup(targetHash, floodfill, 0).catch((err) => {
+      this.sendDatabaseLookup(targetHash, floodfill, lt).catch((err) => {
         logger.debug(`LeaseSet lookup failed: ${(err as Error).message}`, undefined, 'Router');
       });
     });
@@ -858,6 +860,11 @@ export class I2PRouter extends EventEmitter {
 
     // Delegate to NetDbRequests which handles retry logic and discovered router scheduling
     this.netDbRequests.handleSearchReply(key, routerHashes, isExploratory);
+
+    // Follow-up: use the suggested floodfill hashes from the search reply as
+    // candidate lease set lookup targets.  This creates a cascade that helps us
+    // discover LeaseSets stored near those hashes.
+    this.netDb.processSearchReplyForLeaseSetCandidates(routerHashes);
 
     this.emit('databaseSearchReply', { sessionId, message });
   }
