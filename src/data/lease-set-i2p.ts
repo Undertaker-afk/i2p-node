@@ -256,7 +256,7 @@ export function parseLeaseSetLS2(data: Buffer, keyHash: Buffer): LeaseSet | null
       // Skip the offline signature bytes — we've consumed them
       offset += offlineSigLen;
 
-      logger.debug('LS2: parsed offline keys block (transient key type=${transientKeyType})', undefined, 'LeaseSet');
+      logger.debug(`LS2: parsed offline keys block (transient key type=${transientKeyType})`, undefined, 'LeaseSet');
     }
 
     if (flags & PUBLISHED_ENCRYPTED) {
