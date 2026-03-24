@@ -453,6 +453,7 @@ export class NetworkDatabase extends EventEmitter {
     }
     
     if (!this.verifyLeaseSet(leaseSet, fromFloodfill)) {
+      this.emit('leaseSetRejected', { hash, leaseSet, fromFloodfill });
       return false;
     }
     
