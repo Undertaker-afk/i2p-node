@@ -57,6 +57,28 @@ export function getSigningKeyInfo(identityBuf: Buffer): { signingKeyLen: number;
 }
 
 /**
+ * Return signing-key and signature lengths for a raw signing key type number.
+ * Used for offline-signature transient keys where the type comes from a
+ * uint16 field rather than an identity certificate.
+ */
+export function getSigningKeyLengthsFromType(sigType: number): { publicKeyLen: number; signatureLen: number } {
+  switch (sigType) {
+    case  0: return { publicKeyLen: 128, signatureLen: 40  }; // DSA-SHA1
+    case  1: return { publicKeyLen:  64, signatureLen: 64  }; // ECDSA-SHA256-P256
+    case  2: return { publicKeyLen:  96, signatureLen: 96  }; // ECDSA-SHA384-P384
+    case  3: return { publicKeyLen: 132, signatureLen: 132 }; // ECDSA-SHA512-P521
+    case  4: return { publicKeyLen: 256, signatureLen: 256 }; // RSA-SHA256-2048
+    case  5: return { publicKeyLen: 384, signatureLen: 384 }; // RSA-SHA384-3072
+    case  6: return { publicKeyLen: 512, signatureLen: 512 }; // RSA-SHA512-4096
+    case  7: return { publicKeyLen:  32, signatureLen: 64  }; // EdDSA-SHA512-Ed25519
+    case  8: return { publicKeyLen:  64, signatureLen: 64  }; // GOST-256
+    case  9: return { publicKeyLen: 128, signatureLen: 128 }; // GOST-512
+    case 11: return { publicKeyLen:  32, signatureLen: 64  }; // RedDSA-SHA512-Ed25519
+    default: return { publicKeyLen: 128, signatureLen: 40  }; // unknown → DSA fallback
+  }
+}
+
+/**
  * Build a minimal RouterIdentity whose getHash() returns the ident hash
  * (SHA256 over the raw identity bytes).
  */
@@ -195,14 +217,50 @@ export function parseLeaseSetLS2(data: Buffer, keyHash: Buffer): LeaseSet | null
 
     const OFFLINE_KEYS       = 0x0001;
     const PUBLISHED_ENCRYPTED = 0x0004;
-    // Skip offline-key and published-encrypted variants for now
+
+    // 2a) Offline keys block (flag 0x0001)
+    // Layout: expiresTimestamp(4) + transient keyType(2) + transient publicKey(var) + signature(var)
+    let transientPublicKey: Uint8Array | null = null;
+    let offlineSignatureLen = signatureLen; // default: use identity sig length
+
     if (flags & OFFLINE_KEYS) {
-      logger.debug('LS2: offline keys not supported — skipping', undefined, 'LeaseSet');
-      return null;
+      if (offset + 4 > data.length) {
+        logger.debug('LS2: offline keys — truncated at expiresTimestamp', undefined, 'LeaseSet');
+        return null;
+      }
+      // const offlineExpires = data.readUInt32BE(offset);
+      offset += 4;
+
+      if (offset + 2 > data.length) {
+        logger.debug('LS2: offline keys — truncated at transient keyType', undefined, 'LeaseSet');
+        return null;
+      }
+      const transientKeyType = data.readUInt16BE(offset);
+      offset += 2;
+
+      const { publicKeyLen, signatureLen: offlineSigLen } = getSigningKeyLengthsFromType(transientKeyType);
+      offlineSignatureLen = offlineSigLen;
+
+      if (offset + publicKeyLen > data.length) {
+        logger.debug('LS2: offline keys — truncated at transient public key', undefined, 'LeaseSet');
+        return null;
+      }
+      transientPublicKey = Uint8Array.from(data.subarray(offset, offset + publicKeyLen));
+      offset += publicKeyLen;
+
+      // The offline signature follows the transient public key
+      if (offset + offlineSigLen > data.length) {
+        logger.debug('LS2: offline keys — truncated at offline signature', undefined, 'LeaseSet');
+        return null;
+      }
+      // Skip the offline signature bytes — we've consumed them
+      offset += offlineSigLen;
+
+      logger.debug(`LS2: parsed offline keys block (transient key type=${transientKeyType})`, undefined, 'LeaseSet');
     }
+
     if (flags & PUBLISHED_ENCRYPTED) {
-      logger.debug('LS2: published-encrypted flag not supported — skipping', undefined, 'LeaseSet');
-      return null;
+      logger.warn('LS2: published-encrypted flag set — attempting partial parse', undefined, 'LeaseSet');
     }
 
     // 3) Properties
@@ -255,13 +313,13 @@ export function parseLeaseSetLS2(data: Buffer, keyHash: Buffer): LeaseSet | null
     }
 
     // 6) Signature (store non-empty so verifyLeaseSet passes)
-    const sigLen = Math.min(signatureLen, data.length - offset);
+    const sigLen = Math.min(offlineSignatureLen, data.length - offset);
     const signature = sigLen > 0
       ? Uint8Array.from(data.subarray(offset, offset + sigLen))
       : new Uint8Array(64);
 
     const identity = identityFromRaw(identityBuf, keyHash);
-    const signingKey = new Uint8Array(32); // dummy — not used in LS2 body
+    const signingKey = transientPublicKey ?? new Uint8Array(32); // use transient key if offline keys
     const leaseSet = new LeaseSet(identity, encryptionKey, signingKey, leases, signature);
     leaseSet.storeType = 3;
     leaseSet.setWireFormatData(data);
