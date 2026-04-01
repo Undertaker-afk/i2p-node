@@ -263,27 +263,27 @@ export class NetworkDatabase extends EventEmitter {
   }
 
   /**
-   * Extract candidate destination hashes from a DatabaseSearchReply's suggested
-   * floodfill hashes and emit leaseSetLookup events for them. This creates a
-   * cascade: exploratory lookup -> search reply -> follow-up LeaseSet lookups.
+   * When we have 0 lease sets, send a LeaseSet-specific lookup (type 1) to each
+   * of the suggested floodfill hashes from a DatabaseSearchReply, using the
+   * original search key as the lookup target.  This creates a cascade:
+   * exploratory lookup -> search reply -> follow-up LeaseSet lookups.
    */
-  processSearchReplyForLeaseSetCandidates(suggestedHashes: Buffer[]): void {
+  processSearchReplyForLeaseSetCandidates(searchKey: Buffer, suggestedHashes: Buffer[], hasLeaseSets: boolean): void {
+    if (hasLeaseSets) return;
     if (suggestedHashes.length === 0) return;
 
-    const floodfills = this.getFloodfillList();
-    if (floodfills.length === 0) return;
-
-    // Use each suggested hash as a lease set lookup target, querying a subset
-    const maxLookups = Math.min(suggestedHashes.length, 3);
-    for (let i = 0; i < maxLookups; i++) {
-      const targetHash = suggestedHashes[i];
-      const closestFloodfills = this.findClosestFloodfills(targetHash, 2);
-      for (const ff of closestFloodfills) {
-        this.emit('leaseSetLookup', { targetHash, floodfill: ff, lookupType: 1 });
+    let issued = 0;
+    for (const ffHash of suggestedHashes) {
+      const ri = this.lookupRouterInfo(ffHash);
+      if (ri) {
+        this.emit('leaseSetLookup', { targetHash: searchKey, floodfill: ri, lookupType: 1 });
+        issued++;
       }
     }
 
-    logger.debug(`Issued ${maxLookups} follow-up LeaseSet lookups from DatabaseSearchReply candidates`, undefined, 'NetDb');
+    if (issued > 0) {
+      logger.debug(`Issued ${issued} follow-up LeaseSet lookups (type=1) from DatabaseSearchReply to ${suggestedHashes.length} suggested floodfills`, undefined, 'NetDb');
+    }
   }
 
   /**
