@@ -879,10 +879,9 @@ export class I2PRouter extends EventEmitter {
     // Delegate to NetDbRequests which handles retry logic and discovered router scheduling
     this.netDbRequests.handleSearchReply(key, routerHashes, isExploratory);
 
-    // Follow-up: use the suggested floodfill hashes from the search reply as
-    // candidate lease set lookup targets.  This creates a cascade that helps us
-    // discover LeaseSets stored near those hashes.
-    this.netDb.processSearchReplyForLeaseSetCandidates(routerHashes);
+    // Follow-up: if we have 0 lease sets, send a LeaseSet-specific lookup
+    // (type 1) to each suggested floodfill using the original search key.
+    this.netDb.processSearchReplyForLeaseSetCandidates(key, routerHashes, this.netDb.getLeaseSetCount() > 0);
 
     this.emit('databaseSearchReply', { sessionId, message });
   }
