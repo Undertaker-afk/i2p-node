@@ -263,26 +263,27 @@ export class NetworkDatabase extends EventEmitter {
   }
 
   /**
-   * When we have 0 lease sets, send a LeaseSet-specific lookup (type 1) to each
-   * of the suggested floodfill hashes from a DatabaseSearchReply, using the
-   * original search key as the lookup target.  This creates a cascade:
-   * exploratory lookup -> search reply -> follow-up LeaseSet lookups.
+   * Extract candidate destination hashes from a DatabaseSearchReply's suggested
+   * floodfill hashes and emit leaseSetLookup events for them. This creates a
+   * cascade: exploratory lookup -> search reply -> follow-up LeaseSet lookups.
+   * Only fires when we have 0 lease sets and we have suggested floodfills.
+   * Uses the original search key as the lookup target (type 1), sending directly
+   * to each suggested floodfill.
    */
-  processSearchReplyForLeaseSetCandidates(searchKey: Buffer, suggestedHashes: Buffer[], hasLeaseSets: boolean): void {
-    if (hasLeaseSets) return;
+  processSearchReplyForLeaseSetCandidates(searchKey: Buffer, suggestedHashes: Buffer[], leaseSetCount: number): void {
     if (suggestedHashes.length === 0) return;
+    if (leaseSetCount > 0) return;
 
-    let issued = 0;
-    for (const ffHash of suggestedHashes) {
-      const ri = this.lookupRouterInfo(ffHash);
-      if (ri) {
-        this.emit('leaseSetLookup', { targetHash: searchKey, floodfill: ri, lookupType: 1 });
-        issued++;
+    const floodfills = this.getFloodfillList();
+    if (floodfills.length === 0) return;
+
+    const maxLookups = Math.min(suggestedHashes.length, 3);
+    for (let i = 0; i < maxLookups; i++) {
+      const floodfillHash = suggestedHashes[i];
+      const floodfillRouter = this.getRouterInfo(floodfillHash.toString('hex'));
+      if (floodfillRouter) {
+        this.emit('leaseSetLookup', { targetHash: searchKey, floodfill: floodfillRouter, lookupType: 1 });
       }
-    }
-
-    if (issued > 0) {
-      logger.debug(`Issued ${issued} follow-up LeaseSet lookups (type=1) from DatabaseSearchReply to ${suggestedHashes.length} suggested floodfills`, undefined, 'NetDb');
     }
   }
 
@@ -639,6 +640,11 @@ export class NetworkDatabase extends EventEmitter {
 
   getAllRouterInfos(): RouterInfo[] {
     return Array.from(this.routerInfos.values()).map(e => e.data as RouterInfo);
+  }
+
+  getRouterInfo(hash: string): RouterInfo | null {
+    const entry = this.routerInfos.get(hash);
+    return entry ? (entry.data as RouterInfo) : null;
   }
 
   getAllLeaseSets(): LeaseSet[] {

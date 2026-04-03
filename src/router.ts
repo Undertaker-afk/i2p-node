@@ -677,23 +677,9 @@ export class I2PRouter extends EventEmitter {
           undefined,
           'Router'
         );
-
-        // Follow-up: send a LeaseSet lookup (type 1) to this same floodfill
-        // using the same target hash.  The floodfill might have a LeaseSet
-        // stored under a nearby hash.
-        if (this.ntcp2) {
-          const floodfillHash = this.ntcp2.getRouterHashBySessionId(sessionId);
-          if (floodfillHash) {
-            const floodfillRi = this.netDb.lookupRouterInfo(floodfillHash);
-            if (floodfillRi) {
-              logger.debug(
-                `Follow-up LeaseSet lookup (type=1) for ${key.toString('hex').slice(0, 16)}... to floodfill ${floodfillHash.toString('hex').slice(0, 16)}... after RouterInfo store`,
-                undefined,
-                'Router'
-              );
-              this.sendDatabaseLookup(key, floodfillRi, 1).catch(() => undefined);
-            }
-          }
+        const floodfillRouter = this.netDb.getRouterInfo(key.toString('hex'));
+        if (floodfillRouter) {
+          this.netDb.emit('leaseSetLookup', { targetHash: key, floodfill: floodfillRouter, lookupType: 1 });
         }
       } else {
         logger.warn('Failed to deserialize RouterInfo from DatabaseStore (I2P parse failed)', undefined, 'Router');
@@ -879,9 +865,10 @@ export class I2PRouter extends EventEmitter {
     // Delegate to NetDbRequests which handles retry logic and discovered router scheduling
     this.netDbRequests.handleSearchReply(key, routerHashes, isExploratory);
 
-    // Follow-up: if we have 0 lease sets, send a LeaseSet-specific lookup
-    // (type 1) to each suggested floodfill using the original search key.
-    this.netDb.processSearchReplyForLeaseSetCandidates(key, routerHashes, this.netDb.getLeaseSetCount() > 0);
+    // Follow-up: use the suggested floodfill hashes from the search reply as
+    // candidate lease set lookup targets.  This creates a cascade that helps us
+    // discover LeaseSets stored near those hashes.
+    this.netDb.processSearchReplyForLeaseSetCandidates(key, routerHashes, this.netDb.getLeaseSetCount());
 
     this.emit('databaseSearchReply', { sessionId, message });
   }
