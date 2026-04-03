@@ -266,20 +266,23 @@ export class NetworkDatabase extends EventEmitter {
    * Extract candidate destination hashes from a DatabaseSearchReply's suggested
    * floodfill hashes and emit leaseSetLookup events for them. This creates a
    * cascade: exploratory lookup -> search reply -> follow-up LeaseSet lookups.
+   * Only fires when we have 0 lease sets and we have suggested floodfills.
+   * Uses the original search key as the lookup target (type 1), sending directly
+   * to each suggested floodfill.
    */
-  processSearchReplyForLeaseSetCandidates(suggestedHashes: Buffer[]): void {
+  processSearchReplyForLeaseSetCandidates(searchKey: Buffer, suggestedHashes: Buffer[], leaseSetCount: number): void {
     if (suggestedHashes.length === 0) return;
+    if (leaseSetCount > 0) return;
 
     const floodfills = this.getFloodfillList();
     if (floodfills.length === 0) return;
 
-    // Use each suggested hash as a lease set lookup target, querying a subset
     const maxLookups = Math.min(suggestedHashes.length, 3);
     for (let i = 0; i < maxLookups; i++) {
-      const targetHash = suggestedHashes[i];
-      const closestFloodfills = this.findClosestFloodfills(targetHash, 2);
-      for (const ff of closestFloodfills) {
-        this.emit('leaseSetLookup', { targetHash, floodfill: ff, lookupType: 1 });
+      const floodfillHash = suggestedHashes[i];
+      const floodfillRouter = this.getRouterInfo(floodfillHash.toString('hex'));
+      if (floodfillRouter) {
+        this.emit('leaseSetLookup', { targetHash: searchKey, floodfill: floodfillRouter, lookupType: 1 });
       }
     }
 
@@ -622,6 +625,11 @@ export class NetworkDatabase extends EventEmitter {
 
   getAllRouterInfos(): RouterInfo[] {
     return Array.from(this.routerInfos.values()).map(e => e.data as RouterInfo);
+  }
+
+  getRouterInfo(hash: string): RouterInfo | null {
+    const entry = this.routerInfos.get(hash);
+    return entry ? (entry.data as RouterInfo) : null;
   }
 
   getAllLeaseSets(): LeaseSet[] {

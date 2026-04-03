@@ -677,6 +677,10 @@ export class I2PRouter extends EventEmitter {
           undefined,
           'Router'
         );
+        const floodfillRouter = this.netDb.getRouterInfo(key.toString('hex'));
+        if (floodfillRouter) {
+          this.netDb.emit('leaseSetLookup', { targetHash: key, floodfill: floodfillRouter, lookupType: 1 });
+        }
       } else {
         logger.warn('Failed to deserialize RouterInfo from DatabaseStore (I2P parse failed)', undefined, 'Router');
       }
@@ -859,7 +863,7 @@ export class I2PRouter extends EventEmitter {
     // Follow-up: use the suggested floodfill hashes from the search reply as
     // candidate lease set lookup targets.  This creates a cascade that helps us
     // discover LeaseSets stored near those hashes.
-    this.netDb.processSearchReplyForLeaseSetCandidates(routerHashes);
+    this.netDb.processSearchReplyForLeaseSetCandidates(key, routerHashes, this.netDb.getLeaseSetCount());
 
     this.emit('databaseSearchReply', { sessionId, message });
   }

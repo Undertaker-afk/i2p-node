@@ -265,6 +265,15 @@ export class NTCP2Transport extends EventEmitter {
     return null;
   }
 
+  /** Get the remote router hash for a given session ID. */
+  getRouterHashBySessionId(sessionId: string): Buffer | null {
+    const session = this.sessions.get(sessionId);
+    if (session && session.state === 'established' && session.remoteRouterHash) {
+      return Buffer.from(session.remoteRouterHash);
+    }
+    return null;
+  }
+
   getBoundPort(): number | null {
     const addr = this.server?.address();
     return addr && typeof addr === 'object' ? addr.port : null;
