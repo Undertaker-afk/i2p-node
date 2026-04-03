@@ -27,10 +27,10 @@ async function main() {
   let ls2Count = 0;
   let riDbStoreCount = 0;
   let leaseSetRejections = [];
+  let rejectionReasonCounts = {};
   let lsLookupSent = 0;
   let lsLookupSucceeded = 0;
   let lsLookupFailed = 0;
-  let lsLookupFailReasons = {};
   router.on('leaseSetStored', ({ hash }) => {
     leaseSetCount++;
     lsLookupSucceeded++;
@@ -63,11 +63,31 @@ async function main() {
   });
   netDb.on('leaseSetRejected', ({ hash, leaseSet, fromFloodfill }) => {
     const hashHex = hash.toString('hex').slice(0, 16);
-    const reason = (!leaseSet.signature || leaseSet.signature.length === 0)
-      ? 'missing signature'
-      : `storeType=${leaseSet.storeType}, leases=${leaseSet.leases?.length ?? '?'}`;
+    let reason;
+    // Derive reason matching verifyLeaseSet logic in src/netdb/index.ts
+    if (!leaseSet.signature || leaseSet.signature.length === 0) {
+      reason = fromFloodfill ? 'missing signature (floodfill path)' : 'missing signature';
+    } else {
+      const leases = leaseSet.leases;
+      const leaseCount = leases ? leases.length : 0;
+      const expiration = leaseSet.getExpiration ? leaseSet.getExpiration() : 0;
+      const now = Date.now();
+      const expirationDelta = expiration - now;
+      if (leaseCount === 0 && leaseSet.storeType !== 3) {
+        reason = `no leases (storeType=${leaseSet.storeType})`;
+      } else if (leaseCount > 16) {
+        reason = `too many leases (${leaseCount})`;
+      } else if (expiration <= now) {
+        reason = `already expired (delta=${expirationDelta}ms, leases=${leaseCount})`;
+      } else if (expiration > now + 15 * 60 * 1000) {
+        reason = `expiration too far in future (delta=${expirationDelta}ms, leases=${leaseCount})`;
+      } else {
+        reason = `unknown (storeType=${leaseSet.storeType}, leases=${leaseCount}, sigLen=${leaseSet.signature?.length ?? 0})`;
+      }
+    }
     const entry = { hash: hashHex, reason, fromFloodfill };
     leaseSetRejections.push(entry);
+    rejectionReasonCounts[reason] = (rejectionReasonCounts[reason] || 0) + 1;
     console.log(`[TEST] LeaseSet REJECTED: ${hashHex}... reason=${reason} (fromFloodfill=${fromFloodfill})`);
   });
   netDb.on('leaseSetLookup', ({ targetHash, lookupType }) => {
@@ -88,7 +108,6 @@ async function main() {
   const routerInfo = router.getRouterInfo();
   const routerHash = routerInfo?.getRouterHash();
   const routerHashHex = routerHash ? routerHash.toString('hex') : 'N/A';
-  const isFloodfill = !!router.isRunning() && netDb.getFloodfillCount() >= 0; // config-based
   console.log(`[TEST] Router hash: ${routerHashHex}`);
   console.log(`[TEST] Floodfill enabled: true`);
   console.log('[TEST] Router started. Waiting up to 120 seconds for LeaseSet...');
@@ -136,6 +155,12 @@ async function main() {
       `searchReply=${searchReplyCount}`
     );
     console.log(`[TEST] LS lookup summary: sent=${lsLookupSent} succeeded=${lsLookupSucceeded} failed=${lsLookupFailed}`);
+    if (Object.keys(rejectionReasonCounts).length > 0) {
+      console.log('[TEST] Rejection reason breakdown:');
+      for (const [reason, count] of Object.entries(rejectionReasonCounts)) {
+        console.log(`[TEST]   ${reason}: ${count}`);
+      }
+    }
     if (leaseSetRejections.length > 0) {
       console.log(`[TEST] LeaseSet rejections (${leaseSetRejections.length}):`);
       for (const r of leaseSetRejections) {
