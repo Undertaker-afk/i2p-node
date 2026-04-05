@@ -168,13 +168,13 @@ export class NetworkDatabase extends EventEmitter {
    */
   private startExploratory(): void {
     // Explore immediately on start, then use adaptive interval:
-    // - During bootstrap (first 60s): every 5 seconds
+    // - During bootstrap (first 120s): every 5 seconds
     // - After bootstrap: every 30 seconds
     this.exploreNewPeers();
 
     const tick = () => {
       this.exploreNewPeers();
-      const bootstrapping = (Date.now() - this.startedAt) < 60_000;
+      const bootstrapping = (Date.now() - this.startedAt) < 120_000;
       const nextMs = bootstrapping ? 5_000 : 30_000;
       this.exploratoryTimer = setTimeout(tick, nextMs);
     };
@@ -184,7 +184,9 @@ export class NetworkDatabase extends EventEmitter {
   }
 
   /**
-   * Explore new peers by requesting random router hashes
+   * Explore new peers by requesting known router hashes (not random ones).
+   * Uses hashes from stored RouterInfos and floodfill peers as lookup targets,
+   * which increases the chance of receiving actual LeaseSet DatabaseStore replies.
    */
   private exploreNewPeers(): void {
     if (!this.isRunning) return;
@@ -196,38 +198,64 @@ export class NetworkDatabase extends EventEmitter {
       return;
     }
     
-    // Generate a random hash to search for
-    const randomHash = createHash('sha256').update(Math.random().toString()).digest();
+    // Generate a lookup hash from a known router hash instead of random bytes.
+    // This ensures the hash corresponds to a real destination in the network.
+    const routerHashes = Array.from(this.routerInfos.keys());
+    let lookupHash: Buffer;
+    if (routerHashes.length > 0) {
+      const randomIdx = Math.floor(Math.random() * routerHashes.length);
+      lookupHash = Buffer.from(routerHashes[randomIdx], 'hex');
+    } else {
+      lookupHash = createHash('sha256').update(Math.random().toString()).digest();
+    }
     
     // Find closest floodfills — try more during bootstrap for faster peer discovery
-    const bootstrapping = (Date.now() - this.startedAt) < 60_000;
-    const closestFloodfills = this.findClosestFloodfills(randomHash, bootstrapping ? 10 : 3);
+    const bootstrapping = (Date.now() - this.startedAt) < 120_000;
+    const closestFloodfills = this.findClosestFloodfills(lookupHash, bootstrapping ? 10 : 3);
     
-    logger.debug(`Exploring peers near ${randomHash.toString('hex').slice(0, 16)}...`, {
+    logger.debug(`Exploring peers near ${lookupHash.toString('hex').slice(0, 16)}...`, {
       closestFloodfills: closestFloodfills.length
     }, 'NetDb');
     
     // Emit event to request lookup
     for (const floodfill of closestFloodfills) {
       this.emit('exploratoryLookup', {
-        targetHash: randomHash,
+        targetHash: lookupHash,
         floodfill: floodfill
       });
     }
 
-    // Also do normal (type 0) lookups for random hashes to discover LeaseSets.
-    // Keep this aggressive during bootstrap, then back off to one lookup every
-    // 30s until we receive at least one LeaseSet.
+    // LeaseSet discovery: use known hashes from our NetDb as lookup targets.
+    // During first 120s, lookup every 5s. After that, every 30s until we have a LeaseSet.
     const now = Date.now();
     const shouldLookupLeaseSets =
       this.leaseSets.size === 0 &&
       (bootstrapping || (now - this.lastLeaseSetLookupAt) >= 30_000);
 
     if (shouldLookupLeaseSets) {
-      const lsHash = createHash('sha256').update(Date.now().toString() + Math.random().toString()).digest();
+      // Pick a random known router hash as the lease set lookup target
+      let lsHash: Buffer;
+      if (routerHashes.length > 0) {
+        const randomIdx = Math.floor(Math.random() * routerHashes.length);
+        lsHash = Buffer.from(routerHashes[randomIdx], 'hex');
+      } else {
+        lsHash = createHash('sha256').update(Date.now().toString() + Math.random().toString()).digest();
+      }
       const lsFloodfills = this.findClosestFloodfills(lsHash, bootstrapping ? 3 : 1);
       for (const ff of lsFloodfills) {
-        this.emit('leaseSetLookup', { targetHash: lsHash, floodfill: ff });
+        this.emit('leaseSetLookup', { targetHash: lsHash, floodfill: ff, lookupType: 0 });
+      }
+
+      // Also try type 1 (leaseSet-specific) lookups for known floodfill hashes.
+      // Floodfills may have LeaseSets stored under hashes near their own identity.
+      const ffHashes = Array.from(this.floodfillPeers);
+      if (ffHashes.length > 0) {
+        const ffIdx = Math.floor(Math.random() * ffHashes.length);
+        const ffTargetHash = Buffer.from(ffHashes[ffIdx], 'hex');
+        const ffTargetFloodfills = this.findClosestFloodfills(ffTargetHash, bootstrapping ? 3 : 1);
+        for (const ff of ffTargetFloodfills) {
+          this.emit('leaseSetLookup', { targetHash: ffTargetHash, floodfill: ff, lookupType: 1 });
+        }
       }
       this.lastLeaseSetLookupAt = now;
     }
@@ -400,6 +428,7 @@ export class NetworkDatabase extends EventEmitter {
     }
     
     if (!this.verifyLeaseSet(leaseSet, fromFloodfill)) {
+      this.emit('leaseSetRejected', { hash, leaseSet, fromFloodfill });
       return false;
     }
     
@@ -589,6 +618,28 @@ export class NetworkDatabase extends EventEmitter {
 
   getAllLeaseSets(): LeaseSet[] {
     return Array.from(this.leaseSets.values()).map(e => e.data as LeaseSet);
+  }
+
+  getRouterInfo(hash: string): RouterInfo | null {
+    const entry = this.routerInfos.get(hash);
+    return entry ? (entry.data as RouterInfo) : null;
+  }
+
+  processSearchReplyForLeaseSetCandidates(searchKey: Buffer, suggestedHashes: Buffer[], leaseSetCount: number): void {
+    if (suggestedHashes.length === 0) return;
+    if (leaseSetCount > 0) return;
+
+    const floodfills = this.getFloodfillList();
+    if (floodfills.length === 0) return;
+
+    const maxLookups = Math.min(suggestedHashes.length, 3);
+    for (let i = 0; i < maxLookups; i++) {
+      const floodfillHash = suggestedHashes[i];
+      const floodfillRouter = this.getRouterInfo(floodfillHash.toString('hex'));
+      if (floodfillRouter) {
+        this.emit('leaseSetLookup', { targetHash: searchKey, floodfill: floodfillRouter, lookupType: 1 });
+      }
+    }
   }
 
   getFloodfillCount(): number {
