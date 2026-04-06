@@ -677,6 +677,24 @@ export class I2PRouter extends EventEmitter {
           undefined,
           'Router'
         );
+
+        // Follow-up: send a LeaseSet lookup (type 1) to this same floodfill
+        // using the same target hash.  The floodfill might have a LeaseSet
+        // stored under a nearby hash.
+        if (this.ntcp2) {
+          const floodfillHash = this.ntcp2.getRouterHashBySessionId(sessionId);
+          if (floodfillHash) {
+            const floodfillRi = this.netDb.lookupRouterInfo(floodfillHash);
+            if (floodfillRi) {
+              logger.debug(
+                `Follow-up LeaseSet lookup (type=1) for ${key.toString('hex').slice(0, 16)}... to floodfill ${floodfillHash.toString('hex').slice(0, 16)}... after RouterInfo store`,
+                undefined,
+                'Router'
+              );
+              this.sendDatabaseLookup(key, floodfillRi, 1).catch(() => undefined);
+            }
+          }
+        }
       } else {
         logger.warn('Failed to deserialize RouterInfo from DatabaseStore (I2P parse failed)', undefined, 'Router');
       }
@@ -799,7 +817,7 @@ export class I2PRouter extends EventEmitter {
     }
 
     // Try LeaseSet lookup (for normal or leaseSet type)
-    if (!replied && (lookupType === 0 || lookupType === 1)) {
+    if (lookupType === 0 || lookupType === 1) {
       const ls = this.netDb.lookupLeaseSet(key);
       if (ls && this.ntcp2) {
         const lsData = ls.getWireFormatData();

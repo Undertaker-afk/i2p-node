@@ -452,7 +452,7 @@ export class NetworkDatabase extends EventEmitter {
       }
     }
     
-    if (!this.verifyLeaseSet(leaseSet)) {
+    if (!this.verifyLeaseSet(leaseSet, fromFloodfill)) {
       return false;
     }
     
@@ -523,7 +523,16 @@ export class NetworkDatabase extends EventEmitter {
     return true;
   }
 
-  private verifyLeaseSet(leaseSet: LeaseSet): boolean {
+  private verifyLeaseSet(leaseSet: LeaseSet, fromFloodfill = false): boolean {
+    // Trust LeaseSets from known floodfills more — skip strict validation
+    if (fromFloodfill) {
+      if (!leaseSet.signature || leaseSet.signature.length === 0) {
+        logger.debug('LeaseSet rejected (floodfill): missing signature', undefined, 'NetDb');
+        return false;
+      }
+      return true;
+    }
+
     if (!leaseSet.signature || leaseSet.signature.length === 0) {
       logger.debug('LeaseSet rejected: missing signature', undefined, 'NetDb');
       return false;
@@ -531,27 +540,34 @@ export class NetworkDatabase extends EventEmitter {
 
     // Validate lease count (per i2pd: MAX_NUM_LEASES = 16)
     const leases = leaseSet.leases;
-    if (!leases || leases.length === 0) {
+    const leaseCount = leases ? leases.length : 0;
+
+    // For LS2 (storeType 3), accept 0 leases — meta LeaseSets or freshly-published
+    // ones may temporarily have 0 valid leases
+    if (leaseCount === 0 && leaseSet.storeType !== 3) {
       logger.debug('LeaseSet rejected: no leases', undefined, 'NetDb');
       return false;
     }
-    if (leases.length > 16) {
-      logger.debug(`LeaseSet rejected: too many leases (${leases.length})`, undefined, 'NetDb');
+    if (leaseCount > 16) {
+      logger.debug(`LeaseSet rejected: too many leases (${leaseCount})`, undefined, 'NetDb');
       return false;
     }
 
     // Validate expiration: reject already-expired LeaseSets
     const expiration = leaseSet.getExpiration();
     const now = Date.now();
+    const expirationDelta = expiration - now;
     if (expiration <= now) {
-      logger.debug('LeaseSet rejected: already expired', undefined, 'NetDb');
+      logger.debug(`LeaseSet rejected: already expired (delta=${expirationDelta}ms, leases=${leaseCount})`, undefined, 'NetDb');
       return false;
     }
 
-    // Reject LeaseSets with expiration too far in the future (> 11 minutes per i2pd)
-    const maxFuture = 11 * 60 * 1000; // 11 minutes
+    // Reject LeaseSets with expiration too far in the future (> 15 minutes)
+    // i2pd uses LEASESET_EXPIRATION_TIME_THRESHOLD = 720000ms (12 min) plus buffer;
+    // some LeaseSets have leases up to 14 minutes out
+    const maxFuture = 15 * 60 * 1000; // 15 minutes
     if (expiration > now + maxFuture) {
-      logger.debug('LeaseSet rejected: expiration too far in the future', undefined, 'NetDb');
+      logger.debug(`LeaseSet rejected: expiration too far in the future (delta=${expirationDelta}ms, leases=${leaseCount})`, undefined, 'NetDb');
       return false;
     }
 
