@@ -817,6 +817,10 @@ export class I2PRouter extends EventEmitter {
     }
 
     // Try LeaseSet lookup (for normal or leaseSet type)
+    // NOTE: We do NOT gate on `replied` here — a 32-byte key maps to either a RouterInfo
+    // or a LeaseSet, never both. If the RI lookup above matched, the key is an RI hash and
+    // this LS lookup will return null anyway. Removing the gate ensures we never accidentally
+    // skip the LS lookup due to a stale `replied` flag from a previous iteration or edge case.
     if (lookupType === 0 || lookupType === 1) {
       const ls = this.netDb.lookupLeaseSet(key);
       if (ls && this.ntcp2) {
@@ -835,10 +839,11 @@ export class I2PRouter extends EventEmitter {
       }
     }
 
-    // Exploratory: return closest non-floodfill peers (per i2pd)
-    // For any lookup type: if we couldn't answer, send DatabaseSearchReply with closest floodfills
+    // If we couldn't answer, send DatabaseSearchReply with closest floodfills to the key
+    // For leaseSet-specific lookups (type 1), return more candidates since LeaseSets are rarer
     if (!replied && this.ntcp2) {
-      const closestFloodfills = this.netDb.findClosestFloodfills(key, 3);
+      const candidateCount = lookupType === 1 ? 8 : 3;
+      const closestFloodfills = this.netDb.findClosestFloodfills(key, candidateCount);
       const routerHashes = closestFloodfills
         .filter(ff => !excludedSet.has(ff.getRouterHash().toString('hex')))
         .map(ff => ff.getRouterHash());
@@ -877,7 +882,7 @@ export class I2PRouter extends EventEmitter {
     // Follow-up: use the suggested floodfill hashes from the search reply as
     // candidate lease set lookup targets.  This creates a cascade that helps us
     // discover LeaseSets stored near those hashes.
-    this.netDb.processSearchReplyForLeaseSetCandidates(routerHashes);
+    this.netDb.processSearchReplyForLeaseSetCandidates(key, routerHashes, this.netDb.getLeaseSetCount());
 
     this.emit('databaseSearchReply', { sessionId, message });
   }
