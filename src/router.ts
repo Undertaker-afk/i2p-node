@@ -825,7 +825,8 @@ export class I2PRouter extends EventEmitter {
       }
     }
 
-    // If we couldn't answer, send DatabaseSearchReply with closest floodfills to the key
+    // Exploratory: return closest non-floodfill peers (per i2pd)
+    // For any lookup type: if we couldn't answer, send DatabaseSearchReply with closest floodfills
     // For leaseSet-specific lookups (type 1), return more candidates since LeaseSets are rarer
     if (!replied && this.ntcp2) {
       const candidateCount = lookupType === 1 ? 8 : 3;

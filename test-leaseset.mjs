@@ -4,8 +4,9 @@
  */
 import { I2PRouter } from './dist/router.js';
 import { LogLevel } from './dist/utils/logger.js';
+
 const TIMEOUT_MS = 120_000;
-const DB_STORE_TYPE_NAMES = { 0: 'RouterInfo', 1: 'LS1', 3: 'LS2', 5: 'EncryptedLS2', 7: 'MetaLS2' };
+
 async function main() {
   const router = new I2PRouter({
     host: '0.0.0.0',
@@ -19,98 +20,80 @@ async function main() {
     logLevel: LogLevel.DEBUG,
     enableWebUI: false,
   });
+
   let leaseSetCount = 0;
   let routerInfoCount = 0;
   let searchReplyCount = 0;
   let dbStoreCount = 0;
-  let ls1Count = 0;
-  let ls2Count = 0;
-  let riDbStoreCount = 0;
-  let leaseSetRejections = [];
-  let rejectionReasonCounts = {};
-  let lsLookupSent = 0;
-  let lsLookupSucceeded = 0;
-  let lsLookupFailed = 0;
+  let lsType1 = 0, lsType3 = 0, riCount = 0;
+  let rejectedCount = 0;
+
+  // Log router hash and floodfill list at startup
+  const netDb = router.getNetworkDatabase();
+  console.log('[TEST] Router identity:', router.getRouterInfo().getRouterHash().toString('hex').slice(0, 16) + '...');
+
   router.on('leaseSetStored', ({ hash }) => {
     leaseSetCount++;
-    lsLookupSucceeded++;
-    console.log(`[TEST] LeaseSet stored #${leaseSetCount}: ${hash.toString('hex').slice(0, 16)}...`);
+    const storeType = router.getNetworkDatabase().lookupLeaseSet(hash)?.storeType;
+    console.log(`[TEST] LeaseSet stored #${leaseSetCount}: ${hash.toString('hex').slice(0, 16)}... (storeType=${storeType})`);
   });
-  router.on('databaseStore', ({ message }) => {
+
+  // Log rejected LeaseSets with reasons
+  netDb.on('leaseSetRejected', ({ hash, leaseSet, fromFloodfill }) => {
+    rejectedCount++;
+    const leases = leaseSet?.leases?.length ?? 0;
+    const expiration = leaseSet?.getExpiration() ? new Date(leaseSet.getExpiration()).toISOString() : 'unknown';
+    console.log(`[TEST] LeaseSet rejected #${rejectedCount}: ${hash.toString('hex').slice(0, 16)}... (leases=${leases}, fromFloodfill=${fromFloodfill}, expires=${expiration})`);
+  });
+
+  router.on('databaseStore', (evt) => {
     dbStoreCount++;
-    const buf = message.payload;
-    let typeName = 'unknown';
-    if (buf && buf.length > 32) {
-      const typeByte = buf.readUInt8(32);
-      typeName = DB_STORE_TYPE_NAMES[typeByte] || `type=${typeByte}`;
-      if (typeByte === 0) riDbStoreCount++;
-      else if (typeByte === 1) ls1Count++;
-      else if (typeByte === 3) ls2Count++;
+    if (evt.data) {
+      const type = evt.data.storeType;
+      if (type === 1) lsType1++;
+      else if (type === 3) lsType3++;
+      else if (type === 0) riCount++;
+      if (dbStoreCount % 20 === 1) {
+        console.log(`[TEST] DatabaseStore: LS1=${lsType1} LS2=${lsType3} RI=${riCount} total=${dbStoreCount}`);
+      }
     }
-    console.log(`[TEST] DatabaseStore #${dbStoreCount}: ${typeName}`);
   });
+
   router.on('databaseSearchReply', () => {
     searchReplyCount++;
-    console.log(`[TEST] DatabaseSearchReply received (total: ${searchReplyCount})`);
   });
-  // Track router info count from netdb
-  const netDb = router.getNetworkDatabase();
+
   netDb.on('routerInfoStored', () => {
     routerInfoCount++;
-    if (routerInfoCount % 20 === 0) {
+    if (routerInfoCount % 50 === 0) {
       console.log(`[TEST] RouterInfos stored: ${routerInfoCount}`);
     }
   });
-  netDb.on('leaseSetRejected', ({ hash, leaseSet, fromFloodfill }) => {
-    const hashHex = hash.toString('hex').slice(0, 16);
-    let reason;
-    // Derive reason matching verifyLeaseSet logic in src/netdb/index.ts
-    if (!leaseSet.signature || leaseSet.signature.length === 0) {
-      reason = fromFloodfill ? 'missing signature (floodfill path)' : 'missing signature';
-    } else {
-      const leases = leaseSet.leases;
-      const leaseCount = leases ? leases.length : 0;
-      const expiration = leaseSet.getExpiration ? leaseSet.getExpiration() : 0;
-      const now = Date.now();
-      const expirationDelta = expiration - now;
-      if (leaseCount === 0 && leaseSet.storeType !== 3) {
-        reason = `no leases (storeType=${leaseSet.storeType})`;
-      } else if (leaseCount > 16) {
-        reason = `too many leases (${leaseCount})`;
-      } else if (expiration <= now) {
-        reason = `already expired (delta=${expirationDelta}ms, leases=${leaseCount})`;
-      } else if (expiration > now + 15 * 60 * 1000) {
-        reason = `expiration too far in future (delta=${expirationDelta}ms, leases=${leaseCount})`;
-      } else {
-        reason = `unknown (storeType=${leaseSet.storeType}, leases=${leaseCount}, sigLen=${leaseSet.signature?.length ?? 0})`;
-      }
-    }
-    const entry = { hash: hashHex, reason, fromFloodfill };
-    leaseSetRejections.push(entry);
-    rejectionReasonCounts[reason] = (rejectionReasonCounts[reason] || 0) + 1;
-    console.log(`[TEST] LeaseSet REJECTED: ${hashHex}... reason=${reason} (fromFloodfill=${fromFloodfill})`);
-  });
-  netDb.on('leaseSetLookup', ({ targetHash, lookupType }) => {
-    lsLookupSent++;
-    if (lsLookupSent % 5 === 1) {
-      console.log(`[TEST] LeaseSet lookup #${lsLookupSent}: target=${targetHash.toString('hex').slice(0, 16)}... type=${lookupType}`);
-    }
-  });
+
   console.log('[TEST] Starting I2P router...');
   const startTime = Date.now();
+
   try {
     await router.start();
   } catch (err) {
     console.error('[TEST] Failed to start router:', err.message);
     process.exit(1);
   }
-  // Log router hash and floodfill status at startup
-  const routerInfo = router.getRouterInfo();
-  const routerHash = routerInfo?.getRouterHash();
-  const routerHashHex = routerHash ? routerHash.toString('hex') : 'N/A';
-  console.log(`[TEST] Router hash: ${routerHashHex}`);
-  console.log(`[TEST] Floodfill enabled: true`);
+
   console.log('[TEST] Router started. Waiting up to 120 seconds for LeaseSet...');
+
+  // Periodic lookup logging every 10s
+  const periodicLogger = setInterval(() => {
+    const stats = router.getStats();
+    const lsCount = netDb.getLeaseSetCount();
+    const riCount = netDb.getRouterInfoCount();
+    const ffCount = netDb.getFloodfillCount();
+    console.log(
+      `[TEST] Periodic: t=${Math.floor((Date.now() - startTime) / 1000)}s | peers=${riCount} ff=${ffCount} ls=${lsCount} ` +
+      `sent=${stats.messagesSent} recv=${stats.messagesReceived} | rejected=${rejectedCount}`
+    );
+  }, 10000);
+
   // Poll every 2 seconds
   const checkInterval = setInterval(() => {
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
@@ -121,54 +104,30 @@ async function main() {
     console.log(
       `[TEST] t=${elapsed}s | peers=${riCount} ff=${ffCount} ls=${lsCount} ` +
       `sent=${stats.messagesSent} recv=${stats.messagesReceived} ` +
-      `dbStore=${dbStoreCount} (LS1=${ls1Count} LS2=${ls2Count} RI=${riDbStoreCount}) ` +
-      `searchReply=${searchReplyCount} lsLookupsSent=${lsLookupSent}`
+      `dbStore=${dbStoreCount} searchReply=${searchReplyCount}`
     );
     if (lsCount > 0) {
       clearInterval(checkInterval);
+      clearInterval(periodicLogger);
       console.log(`\n[TEST] SUCCESS: Received ${lsCount} LeaseSet(s) after ${elapsed}s`);
       router.stop();
       process.exit(0);
     }
   }, 2000);
-  // Periodic lookup count logging every 10 seconds
-  const lookupLogInterval = setInterval(() => {
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-    console.log(
-      `[TEST] Lookup summary at t=${elapsed}s: sent=${lsLookupSent} succeeded=${lsLookupSucceeded} ` +
-      `failed=${lsLookupFailed} rejections=${leaseSetRejections.length}`
-    );
-  }, 10000);
+
   // Timeout
   setTimeout(() => {
     clearInterval(checkInterval);
-    clearInterval(lookupLogInterval);
+    clearInterval(periodicLogger);
     const stats = router.getStats();
     const lsCount = netDb.getLeaseSetCount();
     const riCount = netDb.getRouterInfoCount();
     const ffCount = netDb.getFloodfillCount();
-    lsLookupFailed = lsLookupSent - lsLookupSucceeded;
     console.log(
       `\n[TEST] TIMEOUT after 120s | peers=${riCount} ff=${ffCount} ls=${lsCount} ` +
       `sent=${stats.messagesSent} recv=${stats.messagesReceived} ` +
-      `dbStore=${dbStoreCount} (LS1=${ls1Count} LS2=${ls2Count} RI=${riDbStoreCount}) ` +
-      `searchReply=${searchReplyCount}`
+      `dbStore=${dbStoreCount} searchReply=${searchReplyCount} | rejected=${rejectedCount}`
     );
-    console.log(`[TEST] LS lookup summary: sent=${lsLookupSent} succeeded=${lsLookupSucceeded} failed=${lsLookupFailed}`);
-    if (Object.keys(rejectionReasonCounts).length > 0) {
-      console.log('[TEST] Rejection reason breakdown:');
-      for (const [reason, count] of Object.entries(rejectionReasonCounts)) {
-        console.log(`[TEST]   ${reason}: ${count}`);
-      }
-    }
-    if (leaseSetRejections.length > 0) {
-      console.log(`[TEST] LeaseSet rejections (${leaseSetRejections.length}):`);
-      for (const r of leaseSetRejections) {
-        console.log(`[TEST]   ${r.hash}... reason=${r.reason} fromFloodfill=${r.fromFloodfill}`);
-      }
-    } else {
-      console.log('[TEST] No LeaseSet rejections recorded');
-    }
     if (lsCount > 0) {
       console.log(`[TEST] SUCCESS: Received ${lsCount} LeaseSet(s)`);
       router.stop();
@@ -180,6 +139,7 @@ async function main() {
     }
   }, TIMEOUT_MS);
 }
+
 main().catch((err) => {
   console.error('[TEST] Unhandled error:', err);
   process.exit(1);

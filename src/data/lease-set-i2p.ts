@@ -218,17 +218,14 @@ export function parseLeaseSetLS2(data: Buffer, keyHash: Buffer): LeaseSet | null
     const OFFLINE_KEYS       = 0x0001;
     const PUBLISHED_ENCRYPTED = 0x0004;
 
-    // 2a) Offline keys block (flag 0x0001)
-    // Layout: expiresTimestamp(4) + transient keyType(2) + transient publicKey(var) + signature(var)
     let transientPublicKey: Uint8Array | null = null;
-    let offlineSignatureLen = signatureLen; // default: use identity sig length
+    let offlineSignatureLen = signatureLen;
 
     if (flags & OFFLINE_KEYS) {
       if (offset + 4 > data.length) {
         logger.debug('LS2: offline keys — truncated at expiresTimestamp', undefined, 'LeaseSet');
         return null;
       }
-      // const offlineExpires = data.readUInt32BE(offset);
       offset += 4;
 
       if (offset + 2 > data.length) {
@@ -248,19 +245,18 @@ export function parseLeaseSetLS2(data: Buffer, keyHash: Buffer): LeaseSet | null
       transientPublicKey = Uint8Array.from(data.subarray(offset, offset + publicKeyLen));
       offset += publicKeyLen;
 
-      // The offline signature follows the transient public key
       if (offset + offlineSigLen > data.length) {
         logger.debug('LS2: offline keys — truncated at offline signature', undefined, 'LeaseSet');
         return null;
       }
-      // Skip the offline signature bytes — we've consumed them
       offset += offlineSigLen;
 
       logger.debug(`LS2: parsed offline keys block (transient key type=${transientKeyType})`, undefined, 'LeaseSet');
     }
 
     if (flags & PUBLISHED_ENCRYPTED) {
-      logger.warn('LS2: published-encrypted flag set — attempting partial parse', undefined, 'LeaseSet');
+      logger.debug('LS2: published-encrypted flag not supported — skipping', undefined, 'LeaseSet');
+      return null;
     }
 
     // 3) Properties
@@ -319,7 +315,7 @@ export function parseLeaseSetLS2(data: Buffer, keyHash: Buffer): LeaseSet | null
       : new Uint8Array(64);
 
     const identity = identityFromRaw(identityBuf, keyHash);
-    const signingKey = transientPublicKey ?? new Uint8Array(32); // use transient key if offline keys
+    const signingKey = transientPublicKey ?? new Uint8Array(32);
     const leaseSet = new LeaseSet(identity, encryptionKey, signingKey, leases, signature);
     leaseSet.storeType = 3;
     leaseSet.setWireFormatData(data);

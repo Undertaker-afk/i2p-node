@@ -257,33 +257,7 @@ export class NetworkDatabase extends EventEmitter {
           this.emit('leaseSetLookup', { targetHash: ffTargetHash, floodfill: ff, lookupType: 1 });
         }
       }
-
       this.lastLeaseSetLookupAt = now;
-    }
-  }
-
-  /**
-   * Extract candidate destination hashes from a DatabaseSearchReply's suggested
-   * floodfill hashes and emit leaseSetLookup events for them. This creates a
-   * cascade: exploratory lookup -> search reply -> follow-up LeaseSet lookups.
-   * Only fires when we have 0 lease sets and we have suggested floodfills.
-   * Uses the original search key as the lookup target (type 1), sending directly
-   * to each suggested floodfill.
-   */
-  processSearchReplyForLeaseSetCandidates(searchKey: Buffer, suggestedHashes: Buffer[], leaseSetCount: number): void {
-    if (suggestedHashes.length === 0) return;
-    if (leaseSetCount > 0) return;
-
-    const floodfills = this.getFloodfillList();
-    if (floodfills.length === 0) return;
-
-    const maxLookups = Math.min(suggestedHashes.length, 3);
-    for (let i = 0; i < maxLookups; i++) {
-      const floodfillHash = suggestedHashes[i];
-      const floodfillRouter = this.getRouterInfo(floodfillHash.toString('hex'));
-      if (floodfillRouter) {
-        this.emit('leaseSetLookup', { targetHash: searchKey, floodfill: floodfillRouter, lookupType: 1 });
-      }
     }
   }
 
@@ -642,13 +616,30 @@ export class NetworkDatabase extends EventEmitter {
     return Array.from(this.routerInfos.values()).map(e => e.data as RouterInfo);
   }
 
+  getAllLeaseSets(): LeaseSet[] {
+    return Array.from(this.leaseSets.values()).map(e => e.data as LeaseSet);
+  }
+
   getRouterInfo(hash: string): RouterInfo | null {
     const entry = this.routerInfos.get(hash);
     return entry ? (entry.data as RouterInfo) : null;
   }
 
-  getAllLeaseSets(): LeaseSet[] {
-    return Array.from(this.leaseSets.values()).map(e => e.data as LeaseSet);
+  processSearchReplyForLeaseSetCandidates(searchKey: Buffer, suggestedHashes: Buffer[], leaseSetCount: number): void {
+    if (suggestedHashes.length === 0) return;
+    if (leaseSetCount > 0) return;
+
+    const floodfills = this.getFloodfillList();
+    if (floodfills.length === 0) return;
+
+    const maxLookups = Math.min(suggestedHashes.length, 3);
+    for (let i = 0; i < maxLookups; i++) {
+      const floodfillHash = suggestedHashes[i];
+      const floodfillRouter = this.getRouterInfo(floodfillHash.toString('hex'));
+      if (floodfillRouter) {
+        this.emit('leaseSetLookup', { targetHash: searchKey, floodfill: floodfillRouter, lookupType: 1 });
+      }
+    }
   }
 
   getFloodfillCount(): number {
