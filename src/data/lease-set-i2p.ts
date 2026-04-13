@@ -255,8 +255,7 @@ export function parseLeaseSetLS2(data: Buffer, keyHash: Buffer): LeaseSet | null
     }
 
     if (flags & PUBLISHED_ENCRYPTED) {
-      logger.debug('LS2: published-encrypted flag not supported — skipping', undefined, 'LeaseSet');
-      return null;
+      logger.warn('LS2: published-encrypted flag set — attempting partial parse', undefined, 'LeaseSet');
     }
 
     // 3) Properties
